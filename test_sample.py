@@ -367,7 +367,7 @@ def test_recurring_booking_partial_success():
 
 
 def test_recurring_booking_permission():
-    print("\n========== 周期预约 - 居民只能操作自己的批次测试 ==========")
+    print("\n========== 周期预约 - 批次列表与详情权限控制测试 ==========")
     from datetime import date, timedelta
     from booking import MAX_RECURRING_WEEKS
 
@@ -393,25 +393,108 @@ def test_recurring_booking_permission():
         "purpose": "钢琴练习",
         "weeks": test_weeks
     }, 201)
-    batch_id = r["batch_id"]
-    print(f"  >> zhangsan 创建周期预约 batch_id={batch_id}")
+    zhangsan_batch_id = r["batch_id"]
+    print(f"  >> zhangsan 创建周期预约 batch_id={zhangsan_batch_id}")
 
-    r = api("get", f"/api/bookings/batches/{batch_id}?operator_id=zhangsan&operator_role=resident")
-    assert r["id"] == batch_id
+    r = api("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "lisi",
+        "start_date": next_tuesday.isoformat(),
+        "start_time": "16:00",
+        "end_time": "18:00",
+        "purpose": "钢琴练习",
+        "weeks": test_weeks
+    }, 201)
+    lisi_batch_id = r["batch_id"]
+    print(f"  >> lisi 创建周期预约 batch_id={lisi_batch_id}")
+
+    print("\n  --- 批次详情接口权限 ---")
+    r = api("get", f"/api/bookings/batches/{zhangsan_batch_id}?operator_id=zhangsan&operator_role=resident")
+    assert r["id"] == zhangsan_batch_id
     assert r["user_id"] == "zhangsan"
-    print(f"  [PASS] zhangsan 可以查看自己的批次")
+    print(f"  [PASS] zhangsan 可以查看自己的批次详情")
 
-    r = api("get", f"/api/bookings/batches/{batch_id}?operator_id=lisi&operator_role=resident", expect_status=422)
+    r = api("get", f"/api/bookings/batches/{zhangsan_batch_id}?operator_id=lisi&operator_role=resident", expect_status=422)
     err_code = get_err_code(r)
     assert err_code == 10007
-    print(f"  [PASS] lisi 不能查看 zhangsan 的批次, error_code={err_code}")
+    print(f"  [PASS] lisi 不能查看 zhangsan 的批次详情, error_code={err_code}")
 
-    r = api("get", f"/api/bookings/batches/{batch_id}?operator_id=admin1&operator_role=admin")
-    assert r["id"] == batch_id
-    print(f"  [PASS] admin 可以查看任意批次")
+    r = api("get", f"/api/bookings/batches/{zhangsan_batch_id}?operator_id=admin1&operator_role=admin")
+    assert r["id"] == zhangsan_batch_id
+    print(f"  [PASS] admin 可以查看任意批次详情")
 
-    print(f"  [PASS] 批次权限控制验证通过")
-    return batch_id
+    print("\n  --- 批次列表接口权限 ---")
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "operator_id": "zhangsan", "operator_role": "resident"
+    })
+    assert r.status_code == 200
+    zhangsan_batches = r.json()
+    zhangsan_batch_ids = [b["id"] for b in zhangsan_batches]
+    assert zhangsan_batch_id in zhangsan_batch_ids
+    assert lisi_batch_id not in zhangsan_batch_ids
+    print(f"  [PASS] zhangsan 查询列表只看到自己的批次: {zhangsan_batch_ids}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "operator_id": "lisi", "operator_role": "resident"
+    })
+    assert r.status_code == 200
+    lisi_batches = r.json()
+    lisi_batch_ids = [b["id"] for b in lisi_batches]
+    assert lisi_batch_id in lisi_batch_ids
+    assert zhangsan_batch_id not in lisi_batch_ids
+    print(f"  [PASS] lisi 查询列表只看到自己的批次: {lisi_batch_ids}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "user_id": "lisi", "operator_id": "zhangsan", "operator_role": "resident"
+    })
+    assert r.status_code == 422
+    err_code = get_err_code(r.json())
+    assert err_code == 10007
+    print(f"  [PASS] zhangsan 传 user_id=lisi 查询列表被拒绝, error_code={err_code}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "user_id": "zhangsan", "operator_id": "zhangsan", "operator_role": "resident"
+    })
+    assert r.status_code == 200
+    self_filter = r.json()
+    self_ids = [b["id"] for b in self_filter]
+    assert zhangsan_batch_id in self_ids
+    assert lisi_batch_id not in self_ids
+    print(f"  [PASS] zhangsan 传 user_id=zhangsan 查询自己的列表成功: {self_ids}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "operator_id": "admin1", "operator_role": "admin"
+    })
+    assert r.status_code == 200
+    admin_batches = r.json()
+    admin_ids = [b["id"] for b in admin_batches]
+    assert zhangsan_batch_id in admin_ids
+    assert lisi_batch_id in admin_ids
+    print(f"  [PASS] admin 不传 user_id 可以看到所有批次: {admin_ids}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "user_id": "lisi", "operator_id": "admin1", "operator_role": "admin"
+    })
+    assert r.status_code == 200
+    admin_lisi_batches = r.json()
+    admin_lisi_ids = [b["id"] for b in admin_lisi_batches]
+    assert lisi_batch_id in admin_lisi_ids
+    assert zhangsan_batch_id not in admin_lisi_ids
+    print(f"  [PASS] admin 传 user_id=lisi 只看到 lisi 的批次: {admin_lisi_ids}")
+
+    print("\n  --- 可见字段验证 ---")
+    for b in zhangsan_batches:
+        assert "user_id" in b
+        assert "total_count" in b
+        assert "success_count" in b
+        assert "skip_count" in b
+        assert "denied_count" in b
+        assert "exceeded_count" in b
+        assert b["user_id"] == "zhangsan"
+    print(f"  [PASS] 列表返回字段完整, user_id 均为当前用户")
+
+    print(f"\n  [PASS] 批次列表与详情权限控制验证全部通过")
+    return zhangsan_batch_id
 
 
 def test_recurring_booking_approval_lock():
@@ -788,11 +871,25 @@ def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before
         )
     print(f"  [PASS] 审计日志查询和导出重启后一致(含 approve/cancel, reject 如有)")
 
-    r = api("get", f"/api/bookings/batches", params={"user_id": "wu_shiyi"})
+    r = api("get", f"/api/bookings/batches", params={
+        "user_id": "wu_shiyi", "operator_id": "admin1", "operator_role": "admin"
+    })
     assert any(b["id"] == batch_id for b in r), (
         f"批次列表中找不到 batch_id={batch_id}"
     )
-    print(f"  [PASS] 批次列表查询正常")
+    print(f"  [PASS] 管理员按 user_id 筛选批次列表查询正常")
+
+    r = api("get", f"/api/bookings/batches", params={
+        "operator_id": "wu_shiyi", "operator_role": "resident"
+    })
+    assert any(b["id"] == batch_id for b in r), (
+        f"居民查询自己批次列表中找不到 batch_id={batch_id}"
+    )
+    for b in r:
+        assert b["user_id"] == "wu_shiyi", (
+            f"居民 wu_shiyi 查询列表出现其他用户的批次 user_id={b['user_id']}"
+        )
+    print(f"  [PASS] 居民查询自己的批次列表正常且全部为本人")
 
     print(f"  [PASS] 重启后一致性验证通过")
 

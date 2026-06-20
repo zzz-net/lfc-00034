@@ -293,11 +293,22 @@ def _batch_to_out(row) -> dict:
 @router.get("/batches", response_model=list[BatchOut])
 def list_batches(
     user_id: str | None = None,
+    operator_id: str | None = None,
+    operator_role: str = "resident",
 ):
     conn = get_db_readonly()
     conditions = []
     params = []
-    if user_id:
+
+    if operator_role == "resident":
+        if user_id is not None and user_id != operator_id:
+            raise BookingError(
+                ErrorCode.PERMISSION_DENIED,
+                "Residents can only list their own batches"
+            )
+        conditions.append("user_id = ?")
+        params.append(operator_id)
+    elif user_id:
         conditions.append("user_id = ?")
         params.append(user_id)
 
