@@ -2,7 +2,7 @@ from datetime import date, time, datetime, timedelta
 
 from fastapi import APIRouter
 
-from booking import MAX_RECURRING_WEEKS
+from booking import MAX_RECURRING_WEEKS, ENV_VAR_NAME
 from booking.database import get_db, get_db_readonly
 from booking.errors import BookingError, ErrorCode
 from booking.models import (
@@ -16,7 +16,10 @@ from booking.models import (
     BatchOut,
     BatchDetailOut,
     VALID_TRANSITIONS,
+    RecurringConfigOut,
 )
+
+from booking import DEFAULT_MAX_RECURRING_WEEKS, MIN_RECURRING_WEEKS, ABSOLUTE_MAX_RECURRING_WEEKS
 
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
 
@@ -140,6 +143,17 @@ def create_booking(body: BookingCreate):
     return result
 
 
+@router.get("/recurring/config", response_model=RecurringConfigOut)
+def get_recurring_config():
+    return RecurringConfigOut(
+        max_recurring_weeks=MAX_RECURRING_WEEKS,
+        min_recurring_weeks=MIN_RECURRING_WEEKS,
+        absolute_max_recurring_weeks=ABSOLUTE_MAX_RECURRING_WEEKS,
+        default_max_recurring_weeks=DEFAULT_MAX_RECURRING_WEEKS,
+        env_var_name=ENV_VAR_NAME,
+    )
+
+
 @router.post("/recurring", response_model=RecurringBookingOut, status_code=201)
 def create_recurring_booking(body: RecurringBookingCreate):
     if body.start_time >= body.end_time:
@@ -148,7 +162,9 @@ def create_recurring_booking(body: RecurringBookingCreate):
     if body.weeks > MAX_RECURRING_WEEKS:
         raise BookingError(
             ErrorCode.BATCH_LIMIT_EXCEEDED,
-            f"Maximum {MAX_RECURRING_WEEKS} weeks allowed, requested {body.weeks}"
+            f"Maximum {MAX_RECURRING_WEEKS} weeks allowed, requested {body.weeks}. "
+            f"Current limit set by {ENV_VAR_NAME}={MAX_RECURRING_WEEKS} "
+            f"(range: {MIN_RECURRING_WEEKS}-{ABSOLUTE_MAX_RECURRING_WEEKS})"
         )
 
     start_str = body.start_time.isoformat()
@@ -162,16 +178,17 @@ def create_recurring_booking(body: RecurringBookingCreate):
 
     with get_db() as conn:
         cur = conn.execute(
-            """INSERT INTO booking_batches (user_id, total_count)
-               VALUES (?, ?)""",
-            (body.user_id, body.weeks),
+            """INSERT INTO booking_batches (user_id, total_count, max_recurring_weeks_at_creation)
+               VALUES (?, ?, ?)""",
+            (body.user_id, body.weeks, MAX_RECURRING_WEEKS),
         )
         batch_id = cur.lastrowid
 
         _write_audit(
             conn, None, "batch_create", None, None,
             body.user_id, "resident",
-            f"Recurring booking batch: {body.weeks} weeks starting {body.start_date.isoformat()}",
+            f"Recurring booking batch: {body.weeks} weeks starting {body.start_date.isoformat()}, "
+            f"max_recurring_weeks={MAX_RECURRING_WEEKS}",
             batch_id=batch_id
         )
 
@@ -286,6 +303,7 @@ def _batch_to_out(row) -> dict:
         "skip_count": row["skip_count"],
         "denied_count": row["denied_count"],
         "exceeded_count": row["exceeded_count"],
+        "max_recurring_weeks_at_creation": row["max_recurring_weeks_at_creation"],
         "created_at": row["created_at"],
     }
 

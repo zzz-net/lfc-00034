@@ -140,11 +140,20 @@ class BatchOut(BaseModel):
     skip_count: int
     denied_count: int
     exceeded_count: int
+    max_recurring_weeks_at_creation: int
     created_at: str
 
 
 class BatchDetailOut(BatchOut):
     bookings: list[BookingOut]
+
+
+class RecurringConfigOut(BaseModel):
+    max_recurring_weeks: int
+    min_recurring_weeks: int
+    absolute_max_recurring_weeks: int
+    default_max_recurring_weeks: int
+    env_var_name: str
 
 
 class ErrorResponse(BaseModel):

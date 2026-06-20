@@ -11,13 +11,55 @@ python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
 
 启动后访问 http://127.0.0.1:8000/docs 查看 Swagger 交互式文档。
 
+### 自定义周期预约上限
+
+周期预约的最大周数通过环境变量 `BOOKING_MAX_RECURRING_WEEKS` 配置：
+
+```bash
+# 默认启动（上限 4 周）
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
+
+# 自定义上限为 8 周（Windows PowerShell）
+$env:BOOKING_MAX_RECURRING_WEEKS="8"
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
+
+# 自定义上限为 8 周（Linux/macOS）
+BOOKING_MAX_RECURRING_WEEKS=8 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
+```
+
+| 参数 | 说明 |
+|------|------|
+| 环境变量名 | `BOOKING_MAX_RECURRING_WEEKS` |
+| 默认值 | `4` |
+| 最小值 | `1`（低于 1 回退到默认值 4） |
+| 绝对上限 | `52`（超过 52 自动截断为 52） |
+| 无效值处理 | 非数字或缺失时回退到默认值 4 |
+
+可通过接口实时查询当前生效的配置：
+
+```bash
+curl http://127.0.0.1:8000/api/bookings/recurring/config
+```
+
+返回示例：
+
+```json
+{
+  "max_recurring_weeks": 4,
+  "min_recurring_weeks": 1,
+  "absolute_max_recurring_weeks": 52,
+  "default_max_recurring_weeks": 4,
+  "env_var_name": "BOOKING_MAX_RECURRING_WEEKS"
+}
+```
+
 ## 运行验收测试
 
 ```bash
 python test_sample.py
 ```
 
-脚本覆盖：主链路（配置→预约→审批→锁定）、重叠审批失败、居民取消他人预约失败、不在开放时段申请失败、持久性验证。
+脚本覆盖：主链路（配置→预约→审批→锁定）、重叠审批失败、居民取消他人预约失败、不在开放时段申请失败、持久性验证、周期预约全链路（部分冲突、权限控制、审批锁定、配置超限、审计链路、环境变量配置、重启一致性）。
 
 ---
 
@@ -40,10 +82,11 @@ python test_sample.py
 |------|------|------|
 | POST | `/api/bookings` | 提交预约 |
 | POST | `/api/bookings/recurring` | 提交周期预约（按周重复） |
+| GET | `/api/bookings/recurring/config` | 查询周期预约当前配置与规则 |
 | GET | `/api/bookings` | 预约列表（按 status/room_id/user_id/date/batch_id 过滤） |
 | GET | `/api/bookings/{id}` | 预约详情 |
 | GET | `/api/bookings/batches` | 批次列表（可按 user_id 过滤） |
-| GET | `/api/bookings/batches/{id}` | 批次详情（含关联预约） |
+| GET | `/api/bookings/batches/{id}` | 批次详情（含关联预约和生效规则） |
 | POST | `/api/bookings/{id}/approve` | 审批通过 |
 | POST | `/api/bookings/{id}/reject` | 审批驳回 |
 | POST | `/api/bookings/{id}/cancel` | 取消预约 |
@@ -104,11 +147,13 @@ pending ──approve──> approved ──cancel──> cancelled
 | 10007 | PERMISSION_DENIED | 无权限（如居民取消他人预约） |
 | 10008 | BOOKING_ALREADY_PROCESSED | 预约已被处理 |
 | 10009 | INVALID_TIME_RANGE | start_time 必须早于 end_time |
+| 10010 | BATCH_LIMIT_EXCEEDED | 周期预约周数超过当前配置上限 |
+| 10011 | BATCH_NOT_FOUND | 批次不存在 |
 
 所有业务错误返回 HTTP 422，响应体为：
 
 ```json
-{"error_code": 10004, "message": "Overlaps with approved booking #1"}
+{"error_code": 10010, "message": "Maximum 4 weeks allowed, requested 10. Current limit set by BOOKING_MAX_RECURRING_WEEKS=4 (range: 1-52)"}
 ```
 
 ---
@@ -151,7 +196,29 @@ curl -X POST http://127.0.0.1:8000/api/bookings \
   }'
 ```
 
-### 7. 审批通过
+### 4. 提交周期预约
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/bookings/recurring \
+  -H "Content-Type: application/json" \
+  -d '{
+    "room_id": 1,
+    "user_id": "zhangsan",
+    "start_date": "2026-06-29",
+    "start_time": "09:00",
+    "end_time": "11:00",
+    "purpose": "每周一舞蹈排练",
+    "weeks": 4
+  }'
+```
+
+### 5. 查询当前周期预约配置
+
+```bash
+curl http://127.0.0.1:8000/api/bookings/recurring/config
+```
+
+### 6. 审批通过
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/bookings/1/approve \
@@ -159,11 +226,19 @@ curl -X POST http://127.0.0.1:8000/api/bookings/1/approve \
   -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "同意"}'
 ```
 
-### 8. 查询已锁定时段
+### 7. 查询已锁定时段
 
 ```bash
 curl "http://127.0.0.1:8000/api/bookings?status=approved&room_id=1"
 ```
+
+### 8. 查看批次详情（含生效规则）
+
+```bash
+curl "http://127.0.0.1:8000/api/bookings/batches/1?operator_id=admin1&operator_role=admin"
+```
+
+返回中包含 `max_recurring_weeks_at_creation` 字段，表示创建该批次时生效的最大周数规则。
 
 ### 9. 居民取消自己的预约
 
@@ -187,13 +262,44 @@ curl "http://127.0.0.1:8000/api/audit/export" -o audit_logs.json
 
 ---
 
-## 配置参数
+## 周期预约配置详解
 
-周期预约的最大周数限制在 [booking/__init__.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/__init__.py) 中配置：
+### 配置项
 
-```python
-MAX_RECURRING_WEEKS = 4  # 周期预约最多 4 周
+| 项目 | 值 |
+|------|-----|
+| 环境变量 | `BOOKING_MAX_RECURRING_WEEKS` |
+| 默认值 | `4` |
+| 有效范围 | `1` ~ `52` |
+| 越界处理 | < 1 或无效值 → 回退默认值 4；> 52 → 截断为 52 |
+| 生效时机 | 服务启动时读取，运行期间不可变，重启后生效 |
+
+### 查询当前生效规则
+
+运行时可通过接口查询：
+
+```bash
+curl http://127.0.0.1:8000/api/bookings/recurring/config
 ```
+
+返回：
+
+```json
+{
+  "max_recurring_weeks": 4,
+  "min_recurring_weeks": 1,
+  "absolute_max_recurring_weeks": 52,
+  "default_max_recurring_weeks": 4,
+  "env_var_name": "BOOKING_MAX_RECURRING_WEEKS"
+}
+```
+
+### 重启后配置切换行为
+
+- 重启服务时修改 `BOOKING_MAX_RECURRING_WEEKS` 后，**新**的周期预约受新上限约束
+- **已有**批次及其子预约的状态、审计记录不受影响，完整保留
+- 每个批次记录了创建时生效的 `max_recurring_weeks_at_creation`，可通过批次详情或审计日志查看
+- 审计日志中 `batch_create` 事件的 `detail` 字段包含当时的 `max_recurring_weeks` 值
 
 ---
 
@@ -203,6 +309,7 @@ MAX_RECURRING_WEEKS = 4  # 周期预约最多 4 周
 1. **不绕过现有校验**：每条子预约都会经过完整的开放时段检查、重叠检测、权限验证
 2. **不破坏单次预约**：现有单次预约逻辑完全独立，不受周期预约影响
 3. **结果透明可追溯**：每条预约的处理结果明确分类，审计日志完整记录
+4. **配置规则可观测**：配置项、默认值、边界值、当前生效值均可通过接口查询
 
 ### 结果分类
 | 状态 | 说明 |
@@ -213,7 +320,7 @@ MAX_RECURRING_WEEKS = 4  # 周期预约最多 4 周
 | `exceeded` | 超过配置的最大周数限制（请求阶段拦截） |
 
 ### 审计链路
-- 批次创建时记录 `batch_create` 审计日志
+- 批次创建时记录 `batch_create` 审计日志，detail 包含当时的 `max_recurring_weeks` 值
 - 每条成功的子预约记录 `create` 审计日志并关联 `batch_id`
 - 后续审批、取消、过期操作的审计日志也会关联 `batch_id`
 - 可通过 `batch_id` 查询整个批次的完整操作历史
@@ -233,7 +340,7 @@ MAX_RECURRING_WEEKS = 4  # 周期预约最多 4 周
 
 ```
 booking/
-  __init__.py
+  __init__.py   # 配置常量与环境变量读取
   main.py       # FastAPI 应用入口
   database.py   # SQLite 连接与表初始化
   models.py     # Pydantic 数据模型

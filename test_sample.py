@@ -11,11 +11,14 @@
   - 权限用例: 居民身份审批被拒绝、staff 身份审批成功
   - 响应格式一致性验证
   - 持久性验证: 查询待审批/已占用/取消记录/审计日志
+  - 周期预约配置端点与文档同步验证
+  - 周期预约全链路: 部分冲突、权限控制、审批锁定、配置超限、审计链路、重启一致性
 """
 
 import sys
 import io
 import json
+import os
 import requests
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -289,10 +292,49 @@ def test_persistence(room_id, booking_id):
     print(f"  >> 操作序列: {actions}")
 
 
+def _get_server_max_weeks():
+    r = api("get", "/api/bookings/recurring/config")
+    return r["max_recurring_weeks"], r
+
+
+_cached_max_weeks = None
+
+def _max_weeks():
+    global _cached_max_weeks
+    if _cached_max_weeks is None:
+        _cached_max_weeks = _get_server_max_weeks()[0]
+    return _cached_max_weeks
+
+
+def test_recurring_config_endpoint():
+    print("\n========== 周期预约 - 配置端点与文档同步验证 ==========")
+    from booking import (
+        DEFAULT_MAX_RECURRING_WEEKS,
+        MIN_RECURRING_WEEKS, ABSOLUTE_MAX_RECURRING_WEEKS, ENV_VAR_NAME,
+    )
+
+    r = api("get", "/api/bookings/recurring/config")
+    assert r["min_recurring_weeks"] == MIN_RECURRING_WEEKS == 1
+    assert r["absolute_max_recurring_weeks"] == ABSOLUTE_MAX_RECURRING_WEEKS == 52
+    assert r["default_max_recurring_weeks"] == DEFAULT_MAX_RECURRING_WEEKS == 4
+    assert r["env_var_name"] == ENV_VAR_NAME == "BOOKING_MAX_RECURRING_WEEKS"
+    assert MIN_RECURRING_WEEKS <= r["max_recurring_weeks"] <= ABSOLUTE_MAX_RECURRING_WEEKS, (
+        f"max_recurring_weeks={r['max_recurring_weeks']} "
+        f"not in range [{MIN_RECURRING_WEEKS}, {ABSOLUTE_MAX_RECURRING_WEEKS}]"
+    )
+    print(f"  [PASS] 配置端点固定值与代码常量完全一致")
+    print(f"    max_recurring_weeks={r['max_recurring_weeks']}")
+    print(f"    min_recurring_weeks={r['min_recurring_weeks']}")
+    print(f"    absolute_max_recurring_weeks={r['absolute_max_recurring_weeks']}")
+    print(f"    default_max_recurring_weeks={r['default_max_recurring_weeks']}")
+    print(f"    env_var_name={r['env_var_name']}")
+    print(f"  [PASS] max_recurring_weeks={r['max_recurring_weeks']} 在有效范围 [{MIN_RECURRING_WEEKS}, {ABSOLUTE_MAX_RECURRING_WEEKS}] 内")
+
+
 def test_recurring_booking_partial_success():
     print("\n========== 周期预约 - 部分成功部分冲突测试 ==========")
     from datetime import date, timedelta
-    from booking import MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
 
     r = api("post", "/api/rooms", {"name": "多功能厅", "description": "三楼多功能厅"}, 201)
     room_id = r["id"]
@@ -369,7 +411,7 @@ def test_recurring_booking_partial_success():
 def test_recurring_booking_permission():
     print("\n========== 周期预约 - 批次列表与详情权限控制测试 ==========")
     from datetime import date, timedelta
-    from booking import MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
 
     r = api("post", "/api/rooms", {"name": "钢琴室", "description": "四楼钢琴室"}, 201)
     room_id = r["id"]
@@ -490,8 +532,9 @@ def test_recurring_booking_permission():
         assert "skip_count" in b
         assert "denied_count" in b
         assert "exceeded_count" in b
+        assert "max_recurring_weeks_at_creation" in b
         assert b["user_id"] == "zhangsan"
-    print(f"  [PASS] 列表返回字段完整, user_id 均为当前用户")
+    print(f"  [PASS] 列表返回字段完整(含 max_recurring_weeks_at_creation), user_id 均为当前用户")
 
     print(f"\n  [PASS] 批次列表与详情权限控制验证全部通过")
     return zhangsan_batch_id
@@ -500,7 +543,7 @@ def test_recurring_booking_permission():
 def test_recurring_booking_approval_lock():
     print("\n========== 周期预约 - 审批后锁定冲突时段测试 ==========")
     from datetime import date, timedelta
-    from booking import MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
 
     r = api("post", "/api/rooms", {"name": "羽毛球室", "description": "地下羽毛球场"}, 201)
     room_id = r["id"]
@@ -598,7 +641,8 @@ def test_recurring_booking_approval_lock():
 def test_recurring_booking_batch_limit():
     print("\n========== 周期预约 - 配置超限测试 ==========")
     from datetime import date, timedelta
-    from booking import MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
+    from booking import ENV_VAR_NAME
 
     r = api("post", "/api/rooms", {"name": "棋牌室", "description": "二楼棋牌室"}, 201)
     room_id = r["id"]
@@ -624,7 +668,15 @@ def test_recurring_booking_batch_limit():
     }, 422)
     err_code = get_err_code(r)
     assert err_code == 10010
+    msg = r.get("message", "")
+    assert ENV_VAR_NAME in msg, (
+        f"越界错误提示应包含环境变量名 {ENV_VAR_NAME}, 实际: {msg}"
+    )
+    assert str(MAX_RECURRING_WEEKS) in msg, (
+        f"越界错误提示应包含当前上限值 {MAX_RECURRING_WEEKS}, 实际: {msg}"
+    )
     print(f"  [PASS] weeks={too_many_weeks} 超过上限 {MAX_RECURRING_WEEKS} 被拒绝, error_code={err_code}")
+    print(f"  [PASS] 错误提示包含可操作信息: {msg}")
 
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
@@ -645,7 +697,7 @@ def test_recurring_booking_batch_limit():
 def test_recurring_booking_audit_chain():
     print("\n========== 周期预约 - 审批/取消后审计链不中断测试 ==========")
     from datetime import date, timedelta
-    from booking import MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
 
     r = api("post", "/api/rooms", {"name": "画室", "description": "七楼画室"}, 201)
     room_id = r["id"]
@@ -688,7 +740,14 @@ def test_recurring_booking_audit_chain():
     r = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id})
     logs_before = r.json()
     print(f"  >> 操作前批次审计日志: {len(logs_before)} 条, actions={[l['action'] for l in logs_before]}")
-    assert len(logs_before) == test_weeks + 1  # 1 batch_create + test_weeks create
+    assert len(logs_before) == test_weeks + 1
+
+    batch_create_log = [l for l in logs_before if l["action"] == "batch_create"][0]
+    assert f"max_recurring_weeks={MAX_RECURRING_WEEKS}" in batch_create_log["detail"], (
+        f"batch_create 审计日志应包含 max_recurring_weeks={MAX_RECURRING_WEEKS}, "
+        f"实际 detail: {batch_create_log['detail']}"
+    )
+    print(f"  [PASS] batch_create 审计日志包含 max_recurring_weeks={MAX_RECURRING_WEEKS}")
 
     api("post", f"/api/bookings/{bid_approve}/approve", {
         "operator_id": "admin1",
@@ -756,6 +815,15 @@ def test_recurring_booking_audit_chain():
     bookings_before = api("get", f"/api/bookings", params={"batch_id": batch_id})
     logs_before_full = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id}).json()
 
+    assert "max_recurring_weeks_at_creation" in batch_before, (
+        f"批次详情应包含 max_recurring_weeks_at_creation 字段"
+    )
+    assert batch_before["max_recurring_weeks_at_creation"] == MAX_RECURRING_WEEKS, (
+        f"max_recurring_weeks_at_creation={batch_before['max_recurring_weeks_at_creation']} "
+        f"!= 当前 MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS}"
+    )
+    print(f"  [PASS] 批次详情 max_recurring_weeks_at_creation={batch_before['max_recurring_weeks_at_creation']}")
+
     print(f"  >> 重启前快照: batch={batch_before['id']}, bookings={len(bookings_before)}, logs={len(logs_before_full)}")
     print(f"  [PASS] 审计链不中断验证通过")
     return batch_id, batch_before, bookings_before, logs_before_full
@@ -763,25 +831,23 @@ def test_recurring_booking_audit_chain():
 
 def test_recurring_booking_config_from_env():
     print("\n========== 周期预约 - 配置从环境变量读取测试 ==========")
-    import os
-    from booking import MAX_RECURRING_WEEKS
+    from booking import ENV_VAR_NAME, DEFAULT_MAX_RECURRING_WEEKS, MIN_RECURRING_WEEKS, ABSOLUTE_MAX_RECURRING_WEEKS
+    MAX_RECURRING_WEEKS = _max_weeks()
 
-    env_val = os.environ.get("BOOKING_MAX_RECURRING_WEEKS")
-    print(f"  >> BOOKING_MAX_RECURRING_WEEKS 环境变量: {env_val!r}")
-    print(f"  >> 当前 MAX_RECURRING_WEEKS = {MAX_RECURRING_WEEKS}")
+    env_val = os.environ.get(ENV_VAR_NAME)
+    print(f"  >> {ENV_VAR_NAME} 环境变量(本进程): {env_val!r}")
+    print(f"  >> 服务端 MAX_RECURRING_WEEKS = {MAX_RECURRING_WEEKS}")
 
-    if env_val:
-        try:
-            expected = max(1, int(env_val))
-        except (ValueError, TypeError):
-            expected = 4
-    else:
-        expected = 4
-
-    assert MAX_RECURRING_WEEKS == expected, (
-        f"MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS} != expected={expected}"
+    assert MIN_RECURRING_WEEKS <= MAX_RECURRING_WEEKS <= ABSOLUTE_MAX_RECURRING_WEEKS, (
+        f"MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS} out of range "
+        f"[{MIN_RECURRING_WEEKS}, {ABSOLUTE_MAX_RECURRING_WEEKS}]"
     )
-    print(f"  [PASS] MAX_RECURRING_WEEKS 正确从环境变量读取: {MAX_RECURRING_WEEKS}")
+    print(f"  [PASS] MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS} 在有效范围内")
+
+    r = api("get", "/api/bookings/recurring/config")
+    assert r["max_recurring_weeks"] == MAX_RECURRING_WEEKS
+    assert r["env_var_name"] == ENV_VAR_NAME
+    print(f"  [PASS] 配置端点值与运行时常量一致")
 
     from datetime import date, timedelta
     r = api("post", "/api/rooms", {"name": "体操室", "description": "八楼体操室"}, 201)
@@ -805,7 +871,10 @@ def test_recurring_booking_config_from_env():
     }, 422)
     err_code = get_err_code(r)
     assert err_code == 10010
+    msg = r.get("message", "")
+    assert ENV_VAR_NAME in msg, f"越界错误应包含 {ENV_VAR_NAME}, 实际: {msg}"
     print(f"  [PASS] weeks={too_many} 超过上限 {MAX_RECURRING_WEEKS}, 被拒绝, error_code={err_code}")
+    print(f"  [PASS] 错误提示含环境变量名: {ENV_VAR_NAME}")
 
     exact_limit = MAX_RECURRING_WEEKS
     r = api("post", "/api/bookings/recurring", {
@@ -823,9 +892,10 @@ def test_recurring_booking_config_from_env():
     print(f"  [PASS] 配置从环境变量读取并生效验证通过")
 
 
-
 def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before, logs_before):
     print("\n========== 周期预约 - 重启后查询和导出一致性测试 ==========")
+    from booking import ENV_VAR_NAME
+    MAX_RECURRING_WEEKS = _max_weeks()
 
     batch_after = api("get", f"/api/bookings/batches/{batch_id}?operator_id=admin1&operator_role=admin")
     bookings_after = api("get", f"/api/bookings", params={"batch_id": batch_id})
@@ -842,6 +912,13 @@ def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before
     assert batch_after["denied_count"] == batch_before["denied_count"]
     assert len(batch_after["bookings"]) == len(batch_before["bookings"])
     print(f"  [PASS] 批次信息重启后一致")
+
+    assert batch_after["max_recurring_weeks_at_creation"] == batch_before["max_recurring_weeks_at_creation"], (
+        f"重启后 max_recurring_weeks_at_creation 不一致: "
+        f"before={batch_before['max_recurring_weeks_at_creation']} "
+        f"after={batch_after['max_recurring_weeks_at_creation']}"
+    )
+    print(f"  [PASS] 批次 max_recurring_weeks_at_creation 重启后一致: {batch_after['max_recurring_weeks_at_creation']}")
 
     assert len(bookings_after) == len(bookings_before)
     for before, after in zip(bookings_before, bookings_after):
@@ -871,6 +948,14 @@ def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before
         )
     print(f"  [PASS] 审计日志查询和导出重启后一致(含 approve/cancel, reject 如有)")
 
+    batch_create_logs = [l for l in logs_after if l["action"] == "batch_create"]
+    assert len(batch_create_logs) == 1
+    assert "max_recurring_weeks=" in batch_create_logs[0]["detail"], (
+        f"重启后 batch_create 审计日志应包含 max_recurring_weeks 信息, "
+        f"实际 detail: {batch_create_logs[0]['detail']}"
+    )
+    print(f"  [PASS] 重启后 batch_create 审计日志仍包含规则信息: {batch_create_logs[0]['detail']}")
+
     r = api("get", f"/api/bookings/batches", params={
         "user_id": "wu_shiyi", "operator_id": "admin1", "operator_role": "admin"
     })
@@ -890,6 +975,11 @@ def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before
             f"居民 wu_shiyi 查询列表出现其他用户的批次 user_id={b['user_id']}"
         )
     print(f"  [PASS] 居民查询自己的批次列表正常且全部为本人")
+
+    r = api("get", "/api/bookings/recurring/config")
+    assert r["max_recurring_weeks"] == MAX_RECURRING_WEEKS
+    assert r["env_var_name"] == ENV_VAR_NAME
+    print(f"  [PASS] 重启后配置端点返回与运行时常量一致")
 
     print(f"  [PASS] 重启后一致性验证通过")
 
@@ -946,6 +1036,76 @@ def test_single_booking_still_works():
     print(f"  [PASS] 单次预约逻辑未受影响")
 
 
+def test_recurring_batch_rules_visibility():
+    print("\n========== 周期预约 - 批次规则可见性与导出完整性测试 ==========")
+    from datetime import date, timedelta
+    MAX_RECURRING_WEEKS = _max_weeks()
+    from booking import ENV_VAR_NAME
+
+    r = api("post", "/api/rooms", {"name": "书法室", "description": "五楼书法室"}, 201)
+    room_id = r["id"]
+
+    next_friday = date.today() + timedelta(days=(7 - date.today().weekday() + 4) % 7)
+    if next_friday == date.today():
+        next_friday += timedelta(days=7)
+    weekday_4 = next_friday.weekday()
+
+    api("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": weekday_4, "start_time": "09:00", "end_time": "18:00"}]
+    }, 201)
+
+    test_weeks = min(2, MAX_RECURRING_WEEKS)
+    r = api("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "sun_shier",
+        "start_date": next_friday.isoformat(),
+        "start_time": "09:00",
+        "end_time": "11:00",
+        "purpose": "书法课",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+
+    r = api("get", f"/api/bookings/batches/{batch_id}?operator_id=admin1&operator_role=admin")
+    assert "max_recurring_weeks_at_creation" in r, "批次详情缺少 max_recurring_weeks_at_creation"
+    assert r["max_recurring_weeks_at_creation"] == MAX_RECURRING_WEEKS, (
+        f"max_recurring_weeks_at_creation={r['max_recurring_weeks_at_creation']} "
+        f"!= MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS}"
+    )
+    print(f"  [PASS] 批次详情含 max_recurring_weeks_at_creation={r['max_recurring_weeks_at_creation']}")
+
+    r = requests.get(f"{BASE}/api/bookings/batches", params={
+        "operator_id": "sun_shier", "operator_role": "resident"
+    })
+    batches = r.json()
+    target = [b for b in batches if b["id"] == batch_id]
+    assert len(target) == 1
+    assert "max_recurring_weeks_at_creation" in target[0]
+    assert target[0]["max_recurring_weeks_at_creation"] == MAX_RECURRING_WEEKS
+    print(f"  [PASS] 批次列表含 max_recurring_weeks_at_creation={target[0]['max_recurring_weeks_at_creation']}")
+
+    r = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id})
+    logs = r.json()
+    batch_create = [l for l in logs if l["action"] == "batch_create"]
+    assert len(batch_create) == 1
+    assert f"max_recurring_weeks={MAX_RECURRING_WEEKS}" in batch_create[0]["detail"]
+    print(f"  [PASS] 审计日志 batch_create 包含规则: {batch_create[0]['detail']}")
+
+    r = requests.get(f"{BASE}/api/audit/export", params={"batch_id": batch_id})
+    exported = r.json()
+    batch_create_export = [l for l in exported if l["action"] == "batch_create"]
+    assert len(batch_create_export) == 1
+    assert f"max_recurring_weeks={MAX_RECURRING_WEEKS}" in batch_create_export[0]["detail"]
+    print(f"  [PASS] 导出审计日志 batch_create 包含规则信息")
+
+    config_r = api("get", "/api/bookings/recurring/config")
+    assert config_r["max_recurring_weeks"] == MAX_RECURRING_WEEKS
+    assert config_r["env_var_name"] == ENV_VAR_NAME
+    print(f"  [PASS] 配置端点与批次记录的规则值一致")
+
+    print(f"  [PASS] 批次规则可见性与导出完整性验证通过")
+
+
 def save_restart_data(batch_id, batch_before, bookings_before, logs_before):
     data = {
         "batch_id": batch_id,
@@ -982,12 +1142,14 @@ def run_before_restart():
     test_non_admin_approval_rejected()
     test_persistence(room_id, booking_id)
 
+    test_recurring_config_endpoint()
     test_recurring_booking_config_from_env()
     test_recurring_booking_partial_success()
     test_recurring_booking_permission()
     test_recurring_booking_approval_lock()
     test_recurring_booking_batch_limit()
     batch_id, batch_before, bookings_before, logs_before = test_recurring_booking_audit_chain()
+    test_recurring_batch_rules_visibility()
     test_single_booking_still_works()
 
     save_restart_data(batch_id, batch_before, bookings_before, logs_before)

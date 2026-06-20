@@ -80,6 +80,7 @@ def init_db():
             skip_count INTEGER NOT NULL DEFAULT 0,
             denied_count INTEGER NOT NULL DEFAULT 0,
             exceeded_count INTEGER NOT NULL DEFAULT 0,
+            max_recurring_weeks_at_creation INTEGER NOT NULL DEFAULT 4,
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
 
@@ -129,6 +130,12 @@ def init_db():
 
     try:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN batch_id INTEGER REFERENCES booking_batches(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE booking_batches ADD COLUMN max_recurring_weeks_at_creation INTEGER NOT NULL DEFAULT 4")
         conn.commit()
     except sqlite3.OperationalError:
         pass

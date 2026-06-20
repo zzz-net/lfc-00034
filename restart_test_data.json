@@ -3,15 +3,16 @@
   "batch_before": {
     "id": 7,
     "user_id": "wu_shiyi",
-    "total_count": 2,
-    "success_count": 2,
+    "total_count": 3,
+    "success_count": 3,
     "skip_count": 0,
     "denied_count": 0,
     "exceeded_count": 0,
-    "created_at": "2026-06-21 02:38:02",
+    "max_recurring_weeks_at_creation": 4,
+    "created_at": "2026-06-21 03:16:09",
     "bookings": [
       {
-        "id": 16,
+        "id": 20,
         "room_id": 8,
         "room_name": "画室",
         "user_id": "wu_shiyi",
@@ -19,13 +20,13 @@
         "date": "2026-06-28",
         "start_time": "10:00:00",
         "end_time": "12:00:00",
-        "status": "cancelled",
+        "status": "approved",
         "purpose": "绘画课程",
-        "created_at": "2026-06-21 02:38:02",
-        "updated_at": "2026-06-21 02:38:02"
+        "created_at": "2026-06-21 03:16:09",
+        "updated_at": "2026-06-21 03:16:09"
       },
       {
-        "id": 17,
+        "id": 21,
         "room_id": 8,
         "room_name": "画室",
         "user_id": "wu_shiyi",
@@ -35,14 +36,42 @@
         "end_time": "12:00:00",
         "status": "rejected",
         "purpose": "绘画课程",
-        "created_at": "2026-06-21 02:38:02",
-        "updated_at": "2026-06-21 02:38:02"
+        "created_at": "2026-06-21 03:16:09",
+        "updated_at": "2026-06-21 03:16:09"
+      },
+      {
+        "id": 22,
+        "room_id": 8,
+        "room_name": "画室",
+        "user_id": "wu_shiyi",
+        "batch_id": 7,
+        "date": "2026-07-12",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "cancelled",
+        "purpose": "绘画课程",
+        "created_at": "2026-06-21 03:16:09",
+        "updated_at": "2026-06-21 03:16:09"
       }
     ]
   },
   "bookings_before": [
     {
-      "id": 17,
+      "id": 22,
+      "room_id": 8,
+      "room_name": "画室",
+      "user_id": "wu_shiyi",
+      "batch_id": 7,
+      "date": "2026-07-12",
+      "start_time": "10:00:00",
+      "end_time": "12:00:00",
+      "status": "cancelled",
+      "purpose": "绘画课程",
+      "created_at": "2026-06-21 03:16:09",
+      "updated_at": "2026-06-21 03:16:09"
+    },
+    {
+      "id": 21,
       "room_id": 8,
       "room_name": "画室",
       "user_id": "wu_shiyi",
@@ -52,11 +81,11 @@
       "end_time": "12:00:00",
       "status": "rejected",
       "purpose": "绘画课程",
-      "created_at": "2026-06-21 02:38:02",
-      "updated_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09",
+      "updated_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 16,
+      "id": 20,
       "room_id": 8,
       "room_name": "画室",
       "user_id": "wu_shiyi",
@@ -64,28 +93,28 @@
       "date": "2026-06-28",
       "start_time": "10:00:00",
       "end_time": "12:00:00",
-      "status": "cancelled",
+      "status": "approved",
       "purpose": "绘画课程",
-      "created_at": "2026-06-21 02:38:02",
-      "updated_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09",
+      "updated_at": "2026-06-21 03:16:09"
     }
   ],
   "logs_before": [
     {
-      "id": 34,
-      "booking_id": 16,
+      "id": 39,
+      "booking_id": 22,
       "batch_id": 7,
       "action": "cancel",
-      "old_status": "approved",
+      "old_status": "pending",
       "new_status": "cancelled",
       "operator_id": "wu_shiyi",
       "operator_role": "resident",
       "detail": "本周不去了",
-      "created_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 33,
-      "booking_id": 17,
+      "id": 38,
+      "booking_id": 21,
       "batch_id": 7,
       "action": "reject",
       "old_status": "pending",
@@ -93,11 +122,11 @@
       "operator_id": "admin1",
       "operator_role": "admin",
       "detail": "时段不合适",
-      "created_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 32,
-      "booking_id": 16,
+      "id": 37,
+      "booking_id": 20,
       "batch_id": 7,
       "action": "approve",
       "old_status": "pending",
@@ -105,11 +134,11 @@
       "operator_id": "admin1",
       "operator_role": "admin",
       "detail": "同意绘画课程",
-      "created_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 31,
-      "booking_id": 17,
+      "id": 36,
+      "booking_id": 22,
       "batch_id": 7,
       "action": "create",
       "old_status": null,
@@ -117,11 +146,11 @@
       "operator_id": "wu_shiyi",
       "operator_role": "resident",
       "detail": "绘画课程",
-      "created_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 30,
-      "booking_id": 16,
+      "id": 35,
+      "booking_id": 21,
       "batch_id": 7,
       "action": "create",
       "old_status": null,
@@ -129,10 +158,22 @@
       "operator_id": "wu_shiyi",
       "operator_role": "resident",
       "detail": "绘画课程",
-      "created_at": "2026-06-21 02:38:02"
+      "created_at": "2026-06-21 03:16:09"
     },
     {
-      "id": 29,
+      "id": 34,
+      "booking_id": 20,
+      "batch_id": 7,
+      "action": "create",
+      "old_status": null,
+      "new_status": "pending",
+      "operator_id": "wu_shiyi",
+      "operator_role": "resident",
+      "detail": "绘画课程",
+      "created_at": "2026-06-21 03:16:09"
+    },
+    {
+      "id": 33,
       "booking_id": null,
       "batch_id": 7,
       "action": "batch_create",
@@ -140,8 +181,8 @@
       "new_status": null,
       "operator_id": "wu_shiyi",
       "operator_role": "resident",
-      "detail": "Recurring booking batch: 2 weeks starting 2026-06-28",
-      "created_at": "2026-06-21 02:38:02"
+      "detail": "Recurring booking batch: 3 weeks starting 2026-06-28, max_recurring_weeks=4",
+      "created_at": "2026-06-21 03:16:09"
     }
   ]
 }
