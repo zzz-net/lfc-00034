@@ -140,6 +140,18 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        conn.execute("ALTER TABLE bookings ADD COLUMN old_date TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE bookings ADD COLUMN rescheduled_from_booking_id INTEGER REFERENCES bookings(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
 
 def close_db():
     if hasattr(_local, "conn") and _local.conn is not None:

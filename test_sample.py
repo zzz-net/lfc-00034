@@ -1180,6 +1180,753 @@ def run_after_restart():
         sys.exit(1)
 
 
+BASE2 = "http://127.0.0.1:8001"
+_PASS2 = 0
+_FAIL2 = 0
+from datetime import date, timedelta as _td
+timedelta = _td
+
+
+def api2(method: str, path: str, data: dict | None = None, expect_status: int = 200, params: dict | None = None) -> dict:
+    url = f"{BASE2}{path}"
+    if method == "get" and data is not None and params is None:
+        params = data
+        data = None
+    resp = getattr(requests, method)(url, json=data, params=params)
+    ok = resp.status_code == expect_status
+    global _PASS2, _FAIL2
+    if ok:
+        _PASS2 += 1
+    else:
+        _FAIL2 += 1
+    tag = "[PASS]" if ok else "[FAIL]"
+    print(f"  {tag} {method.upper()} {path} => {resp.status_code} (expect {expect_status})")
+    if not ok:
+        print(f"    response: {resp.text[:300]}")
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        return {}
+
+
+def _weekday_to_str(w: int) -> str:
+    return ["周一","周二","周三","周四","周五","周六","周日"][w]
+
+
+def _next_weekday(weekday: int, offset_days: int = 14):
+    from datetime import date, timedelta
+    today = date.today()
+    base = today + timedelta(days=offset_days)
+    diff = (weekday - base.weekday()) % 7
+    if diff == 0:
+        diff = 7
+    return base + timedelta(days=diff)
+
+
+# ============================================================
+# 测试1: 批次详情 week_phase 可见性（每周次状态分类）
+# ============================================================
+def test_batch_detail_week_phase():
+    from datetime import date, timedelta
+    print("\n========== 新功能: 批次详情 week_phase 每周次状态分类 ==========")
+
+    r = api2("post", "/api/rooms", {"name": "新功能_排练厅A", "description": "新功能测试房A"}, 201)
+    room_id = r["id"]
+
+    next_mon = _next_weekday(0, 21)
+    next_tue = next_mon + timedelta(days=1)
+
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [
+            {"weekday": 0, "start_time": "09:00", "end_time": "18:00"},
+            {"weekday": 1, "start_time": "09:00", "end_time": "18:00"},
+        ]
+    }, 201)
+
+    test_weeks = min(3, _max_weeks2())
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "new_user_A",
+        "start_date": next_mon.isoformat(),
+        "start_time": "10:00",
+        "end_time": "12:00",
+        "purpose": "新功能测试_排练A",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+    success_items = [i for i in r["items"] if i["status"] == "success"]
+    assert len(success_items) == test_weeks
+    booking_ids = [i["booking_id"] for i in success_items]
+
+    bid_approved = booking_ids[0]
+    bid_finished = booking_ids[-1]
+    api2("post", f"/api/bookings/{bid_approved}/approve", {
+        "operator_id": "admin_new", "operator_role": "admin", "reason": "新功能审批通过"
+    })
+    api2("post", f"/api/bookings/{bid_finished}/cancel", {
+        "operator_id": "new_user_A", "operator_role": "resident", "reason": "新功能自己取消"
+    })
+
+    r = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_new&operator_role=admin")
+    assert "bookings" in r
+    bk_list = r["bookings"]
+    assert len(bk_list) == test_weeks, f"期望{test_weeks}条, 实际{len(bk_list)}"
+
+    phases = {b["id"]: b["week_phase"] for b in bk_list}
+
+    for b in bk_list:
+        assert "week_phase" in b, f"预约#{b['id']}缺少week_phase字段"
+        assert b["week_phase"] in {"preserved_in_effect", "preserved_approved", "adjustable", "finished"}, (
+            f"预约#{b['id']} week_phase={b['week_phase']} 不在允许集合"
+        )
+
+    assert phases[bid_approved] == "preserved_approved", (
+        f"已审批预约#{bid_approved} phase={phases[bid_approved]}, 期望preserved_approved"
+    )
+    assert phases[bid_finished] == "finished", (
+        f"已取消预约#{bid_finished} phase={phases[bid_finished]}, 期望finished"
+    )
+
+    adjustable_bids = [bid for bid, ph in phases.items() if ph == "adjustable"]
+    assert len(adjustable_bids) >= 1, f"至少应有1个adjustable, 实际phases={phases}"
+
+    for b in bk_list:
+        if b["week_phase"] == "preserved_approved":
+            assert b["status"] == "approved"
+        if b["week_phase"] == "finished":
+            assert b["status"] in {"cancelled", "rejected", "expired"}
+
+    print(f"  [PASS] 批次详情week_phase正确: phases={phases}")
+    print(f"    (preserved_approved 含已审批 {bid_approved}; finished 含已取消 {bid_finished})")
+    return room_id, batch_id, phases, booking_ids
+
+
+def _max_weeks2():
+    r = api2("get", "/api/bookings/recurring/config")
+    return r["max_recurring_weeks"]
+
+
+# ============================================================
+# 测试2: 批量改期 - 权限边界 & 保护已审批 & 部分成功
+# ============================================================
+def test_batch_reschedule_permission_and_protection(room_id, batch_id, phases, booking_ids):
+    print("\n========== 新功能: 批量改期 - 权限边界、已审批保护、部分成功 ==========")
+
+    preserved_bid = next(bid for bid, ph in phases.items() if ph == "preserved_approved")
+    adjustable_bids = [bid for bid, ph in phases.items() if ph == "adjustable"]
+    finished_bid = next(bid for bid, ph in phases.items() if ph == "finished")
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": (date.today() + timedelta(days=60)).isoformat(),
+        "operator_id": "other_resident",
+        "operator_role": "resident",
+        "reason": "他人越权改期"
+    }, 422)
+    assert get_err_code(r) == 10007, f"居民改期他人批次应返回10007, 实际={get_err_code(r)}"
+    print(f"  [PASS] 居民other_resident无法改期new_user_A的批次(权限边界), err=10007")
+
+    next_mon_later = _next_weekday(0, 35)
+    r = api2("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": next_mon_later.isoformat(),
+        "operator_id": "new_user_A",
+        "operator_role": "resident",
+        "reason": "我要调整后续周次"
+    })
+    assert r["operation"] == "reschedule"
+    assert r["batch_id"] == batch_id
+    assert r["user_id"] == "new_user_A"
+
+    total = r["total"]
+    success = r["success"]
+    preserved = r["preserved"]
+    denied = r["denied"]
+    skipped = r["skipped"]
+    print(f"  >> 改期结果: total={total}, success={success}, preserved={preserved}, denied={denied}, skipped={skipped}")
+
+    assert total == success + preserved + denied + skipped
+    assert preserved >= 2, f"至少应保护2条(已审批+已取消/已结束), 实际preserved={preserved}"
+
+    preserved_items = [i for i in r["items"] if i["result"] == "preserved"]
+    preserved_bids_result = {i["booking_id"] for i in preserved_items}
+    assert preserved_bid in preserved_bids_result, (
+        f"已审批预约#{preserved_bid}应在preserved中"
+    )
+    assert finished_bid in preserved_bids_result or finished_bid in {i["booking_id"] for i in r["items"] if i["result"] in ("preserved","skipped")}, (
+        f"已取消预约#{finished_bid}应在preserved/skipped中"
+    )
+    for item in preserved_items:
+        assert item["old_date"] == item["new_date"], (
+            f"preserved条目 old_date={item['old_date']}应等于new_date={item['new_date']}"
+        )
+        assert item["week_phase_before"] in {"preserved_in_effect", "preserved_approved", "finished"}
+
+    success_items = [i for i in r["items"] if i["result"] == "success"]
+    for item in success_items:
+        assert item["booking_id"] in adjustable_bids
+        assert item["old_date"] != item["new_date"], (
+            f"success条目 old_date={item['old_date']}应不等于new_date={item['new_date']}"
+        )
+        assert item["old_status"] == item["new_status"] == "pending"
+        assert item["week_phase_before"] == "adjustable"
+
+    print(f"  [PASS] 改期结果结构正确: preserved保护了{preserved}条(含已审批{preserved_bid}), success改了{success}条")
+    print(f"  [PASS] 改期响应含配置快照: creation={r['max_recurring_weeks_at_creation']}, operation={r['max_recurring_weeks_at_operation']}")
+
+    r_after = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_new&operator_role=admin")
+    bk_after = {b["id"]: b for b in r_after["bookings"]}
+    for item in success_items:
+        bid = item["booking_id"]
+        assert bk_after[bid]["date"] == item["new_date"], (
+            f"改期后DB中日期应为{item['new_date']}, 实际={bk_after[bid]['date']}"
+        )
+        assert bk_after[bid]["old_date"] == item["old_date"], (
+            f"改期后DB中old_date应为{item['old_date']}, 实际={bk_after[bid].get('old_date')}"
+        )
+        assert bk_after[bid]["rescheduled_from_booking_id"] == bid
+    print(f"  [PASS] 改期后查询一致: DB中date/old_date/rescheduled_from_booking_id正确写入")
+
+    logs = requests.get(f"{BASE2}/api/audit", params={"batch_id": batch_id}).json()
+    actions = [l["action"] for l in logs]
+    assert "batch_reschedule_start" in actions, "缺少batch_reschedule_start审计"
+    assert "batch_reschedule_end" in actions, "缺少batch_reschedule_end审计"
+    assert actions.count("reschedule") == success, f"reschedule审计应{success}条, 实际{actions.count('reschedule')}"
+    for l in logs:
+        if l["action"] == "reschedule":
+            assert "max_recurring_weeks_at_operation=" in l["detail"], (
+                f"reschedule审计detail应含max_recurring_weeks_at_operation, 实际={l['detail']}"
+            )
+    print(f"  [PASS] 审计链完整: batch_reschedule_start/{success}xreschedule/batch_reschedule_end, 含max_recurring_weeks_at_operation")
+    return r
+
+
+# ============================================================
+# 测试3: 批量改期 - 冲突与slot不开放(部分成功部分拒绝)
+# ============================================================
+def test_batch_reschedule_partial_conflict():
+    print("\n========== 新功能: 批量改期 - 冲突/slot不开放, 部分成功部分拒绝 ==========")
+
+    r = api2("post", "/api/rooms", {"name": "新功能_排练厅B", "description": "改期冲突测试"}, 201)
+    room_id = r["id"]
+
+    next_wed = _next_weekday(2, 28)
+    next_thu = next_wed + timedelta(days=1)
+
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [
+            {"weekday": 2, "start_time": "09:00", "end_time": "18:00"},
+        ]
+    }, 201)
+
+    test_weeks = min(3, _max_weeks2())
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "new_user_B",
+        "start_date": next_wed.isoformat(),
+        "start_time": "10:00",
+        "end_time": "12:00",
+        "purpose": "新功能_改期冲突源批次",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+    success_items = [i for i in r["items"] if i["status"] == "success"]
+    assert len(success_items) == test_weeks
+
+    blocker_date = next_wed + timedelta(weeks=0)
+    r_blocker = api2("post", "/api/bookings", {
+        "room_id": room_id,
+        "user_id": "blocker_user",
+        "date": blocker_date.isoformat(),
+        "start_time": "10:00",
+        "end_time": "12:00",
+        "purpose": "冲突占用者"
+    }, 201)
+    blocker_bid = r_blocker["id"]
+    api2("post", f"/api/bookings/{blocker_bid}/approve", {
+        "operator_id": "admin_new", "operator_role": "admin", "reason": "审批占用者"
+    })
+    print(f"  >> 在{blocker_date}预先创建并审批通过占用预约#{blocker_bid}")
+
+    next_mon_after = _next_weekday(0, 49)
+    r = api2("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": next_mon_after.isoformat(),
+        "operator_id": "new_user_B",
+        "operator_role": "resident",
+        "reason": "改期到周一, 但slot不开放+有冲突"
+    })
+
+    print(f"  >> 改期结果: total={r['total']}, success={r['success']}, preserved={r['preserved']}, denied={r['denied']}, skipped={r['skipped']}")
+    assert r["total"] == r["success"] + r["preserved"] + r["denied"] + r["skipped"]
+
+    denied_items = [i for i in r["items"] if i["result"] == "denied"]
+    denied_codes = {i["error_code"] for i in denied_items}
+    print(f"  >> denied error_codes: {denied_codes}")
+    assert 10015 in denied_codes or 10016 in denied_codes or 10003 in denied_codes, (
+        f"至少应有一个denied是slot不开放(10015/10003)或冲突(10016), 实际codes={denied_codes}"
+    )
+    for item in denied_items:
+        assert item["old_status"] == item["new_status"] == "pending"
+        assert item["message"] is not None
+
+    preserved_items = [i for i in r["items"] if i["result"] == "preserved"]
+    for item in preserved_items:
+        assert item["week_phase_before"] is not None
+
+    if r["success"] > 0:
+        success_items2 = [i for i in r["items"] if i["result"] == "success"]
+        for item in success_items2:
+            assert item["old_date"] != item["new_date"]
+        print(f"  [PASS] {r['success']}条成功改期, {len(denied_items)}条被拒绝(含slot/冲突), {r['preserved']}条被保护")
+    else:
+        assert len(denied_items) > 0, "如果全部失败, denied_items不应为空"
+        print(f"  [PASS] 全部被拒绝(符合预期, 因slot不开放), denied={len(denied_items)}")
+
+    print(f"  [PASS] 改期部分成功/部分拒绝: success/preserved/denied/skipped 都清楚, 无静默覆盖")
+    return r
+
+
+# ============================================================
+# 测试4: 整批取消 - 权限边界 & 居民不能取消已审批 & 管理员可以代取消
+# ============================================================
+def test_batch_cancel_permission_and_roles():
+    print("\n========== 新功能: 整批取消 - 权限边界、居民保护已审批、管理员代取消 ==========")
+
+    r = api2("post", "/api/rooms", {"name": "新功能_会议室C", "description": "取消测试房"}, 201)
+    room_id = r["id"]
+
+    next_fri = _next_weekday(4, 28)
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": 4, "start_time": "09:00", "end_time": "20:00"}]
+    }, 201)
+
+    test_weeks = min(3, _max_weeks2())
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "new_user_C",
+        "start_date": next_fri.isoformat(),
+        "start_time": "14:00",
+        "end_time": "16:00",
+        "purpose": "新功能_批次取消测试",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+    success_items = [i for i in r["items"] if i["status"] == "success"]
+    assert len(success_items) == test_weeks
+    booking_ids = [i["booking_id"] for i in success_items]
+
+    bid_approved = booking_ids[0]
+    r = api2("post", f"/api/bookings/{bid_approved}/approve", {
+        "operator_id": "admin_cancel", "operator_role": "admin", "reason": "审批后测试取消权限"
+    })
+    print(f"  >> 审批通过 #{bid_approved}, 状态={r['status']}")
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/cancel", {
+        "operator_id": "other_resident",
+        "operator_role": "resident",
+        "reason": "越权取消"
+    }, 422)
+    assert get_err_code(r) == 10007, f"居民取消他人批次应10007, 实际={get_err_code(r)}"
+    print(f"  [PASS] 居民other_resident无法取消new_user_C的批次(权限边界), err=10007")
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/cancel", {
+        "operator_id": "new_user_C",
+        "operator_role": "resident",
+        "reason": "我自己取消"
+    })
+    assert r["operation"] == "cancel"
+    total_res = r["total"]
+    success_res = r["success"]
+    preserved_res = r["preserved"]
+    denied_res = r["denied"]
+    skipped_res = r["skipped"]
+    print(f"  >> 居民取消结果: total={total_res}, success={success_res}, preserved={preserved_res}, denied={denied_res}, skipped={skipped_res}")
+    assert total_res == success_res + preserved_res + denied_res + skipped_res
+    assert preserved_res >= 1, f"至少应保护1条(已审批的), 实际preserved={preserved_res}"
+
+    preserved_items = [i for i in r["items"] if i["result"] == "preserved"]
+    preserved_bids = {i["booking_id"] for i in preserved_items}
+    assert bid_approved in preserved_bids, (
+        f"已审批预约#{bid_approved}应在居民取消时被preserved"
+    )
+    for item in preserved_items:
+        if item["booking_id"] == bid_approved:
+            assert "approved" in item["message"].lower() or "admin" in item["message"].lower() or item["week_phase_before"] == "preserved_approved"
+    print(f"  [PASS] 居民取消: 已审批#{bid_approved}被保护(preserved), pending的{success_res}条成功取消")
+
+    success_items_res = [i for i in r["items"] if i["result"] == "success"]
+    for item in success_items_res:
+        assert item["old_status"] == "pending"
+        assert item["new_status"] == "cancelled"
+
+    logs = requests.get(f"{BASE2}/api/audit", params={"batch_id": batch_id}).json()
+    actions = [l["action"] for l in logs]
+    assert "batch_cancel_start" in actions
+    assert "batch_cancel_end" in actions
+    assert actions.count("cancel") == success_res + 1 + len([a for a in actions if a == "cancel"]) - success_res - 1 + 0
+    cancel_by_batch = [l for l in logs if l["action"] == "cancel" and "Batch cancel" in l["detail"]]
+    assert len(cancel_by_batch) >= success_res
+    print(f"  [PASS] 审计链完整: batch_cancel_start / 单条cancel / batch_cancel_end")
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/cancel", {
+        "operator_id": "admin_cancel",
+        "operator_role": "admin",
+        "reason": "管理员代取消已审批的"
+    })
+    print(f"  >> 管理员取消结果: total={r['total']}, success={r['success']}, preserved={r['preserved']}, denied={r['denied']}, skipped={r['skipped']}")
+
+    admin_success_items = [i for i in r["items"] if i["result"] == "success"]
+    admin_approved_cancel = [i for i in admin_success_items if i["booking_id"] == bid_approved]
+    assert len(admin_approved_cancel) == 1, f"管理员应能代取消已审批#{bid_approved}"
+    item = admin_approved_cancel[0]
+    assert item["old_status"] == "approved"
+    assert item["new_status"] == "cancelled"
+    assert item["week_phase_before"] == "preserved_approved"
+    print(f"  [PASS] 管理员admin_cancel成功代取消已审批#{bid_approved}, old=approved new=cancelled")
+
+    r_after = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_cancel&operator_role=admin")
+    for b in r_after["bookings"]:
+        if b["id"] != bid_approved and b["week_phase"] == "finished":
+            continue
+        if b["id"] in [i["booking_id"] for i in success_items_res] or b["id"] == bid_approved:
+            assert b["status"] == "cancelled", f"#{b['id']} 应已cancelled, 实际={b['status']}"
+    print(f"  [PASS] 管理员取消后回查: 所有pending和已审批的都已是cancelled")
+
+    return batch_id
+
+
+# ============================================================
+# 测试5: 批次详情空批次 / 无adjustable改期
+# ============================================================
+def test_batch_nothing_to_operate():
+    print("\n========== 新功能: 空可操作批次处理(返回清晰错误) ==========")
+
+    r = api2("post", "/api/rooms", {"name": "新功能_阅读室D", "description": "全取消测试房"}, 201)
+    room_id = r["id"]
+    next_sat = _next_weekday(5, 28)
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": 5, "start_time": "09:00", "end_time": "18:00"}]
+    }, 201)
+
+    test_weeks = min(2, _max_weeks2())
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "new_user_D",
+        "start_date": next_sat.isoformat(),
+        "start_time": "09:30",
+        "end_time": "11:00",
+        "purpose": "新功能_全审批批次",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+    bids = [i["booking_id"] for i in r["items"] if i["status"] == "success"]
+
+    for bid in bids:
+        api2("post", f"/api/bookings/{bid}/approve", {
+            "operator_id": "admin_all", "operator_role": "admin", "reason": "全部审批"
+        })
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": (date.today() + timedelta(days=90)).isoformat(),
+        "operator_id": "new_user_D",
+        "operator_role": "resident",
+        "reason": "想改但全已审批"
+    }, 422)
+    err = get_err_code(r)
+    assert err == 10014, f"全部已审批后改期应返回10014, 实际={err}. msg={r.get('message')}"
+    print(f"  [PASS] 全部已审批批次改期返回清晰的 BATCH_NOTHING_TO_OPERATE(10014), msg={r.get('message')}")
+
+    r = api2("post", f"/api/bookings/batches/{batch_id}/cancel", {
+        "operator_id": "new_user_D",
+        "operator_role": "resident",
+        "reason": "想取消但全已审批(居民)"
+    })
+    preserved = r["preserved"]
+    assert preserved == test_weeks, f"居民取消全已审批应全部preserved({test_weeks}), 实际={preserved}"
+    print(f"  [PASS] 居民取消全已审批批次: 全部{preserved}条preserved, 无静默取消")
+    return batch_id
+
+
+# ============================================================
+# 测试6: 批次导出 - 含配置快照、规则值、周次状态、审计日志
+# ============================================================
+def test_batch_export_consistency(batch_id_for_export):
+    print("\n========== 新功能: 批次导出 - 配置快照/回查一致/含审计 ==========")
+
+    r = api2("get", f"/api/bookings/batches/{batch_id_for_export}/export", expect_status=422, params={
+        "operator_id": "other_resident_export", "operator_role": "resident"
+    })
+    assert get_err_code(r) == 10007, f"居民export他人批次应10007, 实际={get_err_code(r)}"
+    print(f"  [PASS] 导出权限边界: resident不能导出他人批次, err=10007")
+
+    resp = requests.get(
+        f"{BASE2}/api/bookings/batches/{batch_id_for_export}/export",
+        params={"operator_id": "admin_new", "operator_role": "admin"}
+    )
+    assert resp.status_code == 200
+    assert "attachment" in resp.headers.get("Content-Disposition", ""), (
+        f"导出应返回Content-Disposition attachment, 实际={resp.headers.get('Content-Disposition')}"
+    )
+    exp = resp.json()
+    print(f"  [PASS] 管理员导出成功, Content-Disposition=attachment")
+
+    assert "batch" in exp
+    assert "config_snapshot" in exp
+    assert "bookings" in exp
+    assert "batch_level_audit_logs" in exp
+    assert "summary" in exp
+
+    cfg = exp["config_snapshot"]
+    for k in ("max_recurring_weeks_at_creation", "max_recurring_weeks_current",
+              "min_recurring_weeks", "absolute_max_recurring_weeks",
+              "default_max_recurring_weeks", "env_var_name"):
+        assert k in cfg, f"config_snapshot缺少{k}"
+    assert cfg["env_var_name"] == "BOOKING_MAX_RECURRING_WEEKS"
+    assert 1 <= cfg["min_recurring_weeks"] <= cfg["max_recurring_weeks_at_creation"] <= cfg["absolute_max_recurring_weeks"] <= 52
+    print(f"  [PASS] config_snapshot字段齐全且范围正确: creation={cfg['max_recurring_weeks_at_creation']}, current={cfg['max_recurring_weeks_current']}")
+
+    detail = api2("get", f"/api/bookings/batches/{batch_id_for_export}?operator_id=admin_new&operator_role=admin")
+    assert len(exp["bookings"]) == len(detail["bookings"]), (
+        f"导出bookings={len(exp['bookings'])} vs 详情bookings={len(detail['bookings'])}, 数量不一致"
+    )
+    detail_map = {b["id"]: b for b in detail["bookings"]}
+    for b in exp["bookings"]:
+        d = detail_map[b["id"]]
+        assert b["date"] == d["date"], f"#{b['id']} date不一致"
+        assert b["status"] == d["status"], f"#{b['id']} status不一致"
+        assert b["week_phase"] == d["week_phase"], f"#{b['id']} week_phase不一致"
+        assert "audit_logs" in b, f"#{b['id']} 缺少每条的audit_logs"
+    print(f"  [PASS] 导出bookings与批次详情查询一一对应: 共{len(exp['bookings'])}条, date/status/week_phase全一致")
+
+    audit_batch = requests.get(f"{BASE2}/api/audit", params={"batch_id": batch_id_for_export}).json()
+    audit_ids_export = set()
+    for b in exp["bookings"]:
+        for lg in b["audit_logs"]:
+            audit_ids_export.add(lg["id"])
+    for lg in exp["batch_level_audit_logs"]:
+        audit_ids_export.add(lg["id"])
+    audit_ids_query = {l["id"] for l in audit_batch}
+    assert audit_ids_export == audit_ids_query, (
+        f"导出审计id集合与/audit?batch_id查询集合不一致, 差集add={audit_ids_query-audit_ids_export}, 丢={audit_ids_export-audit_ids_query}"
+    )
+    print(f"  [PASS] 导出审计id({len(audit_ids_export)}条) 与 /audit?batch_id 查询({len(audit_ids_query)}条)完全一致")
+
+    s = exp["summary"]
+    for k in ("total_bookings", "preserved_in_effect", "preserved_approved", "adjustable", "finished"):
+        assert k in s
+    assert s["total_bookings"] == len(exp["bookings"])
+    print(f"  [PASS] 导出summary统计齐全: {s}")
+    print(f"  [PASS] 导出完整, 与回查完全一致")
+
+
+# ============================================================
+# 测试7: 重启前后配置切换 - max_recurring_weeks_at_creation/operation
+# ============================================================
+def test_batch_config_switch_restart():
+    print("\n========== 新功能: 重启/配置切换 - creation vs operation 规则不串 ==========")
+
+    from booking import ENV_VAR_NAME
+
+    config_now = api2("get", "/api/bookings/recurring/config")
+    now_max = config_now["max_recurring_weeks"]
+
+    r = api2("post", "/api/rooms", {"name": "新功能_规则验证室E", "description": "配置切换测试"}, 201)
+    room_id = r["id"]
+
+    next_sun = _next_weekday(6, 42)
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": 6, "start_time": "08:00", "end_time": "20:00"}]
+    }, 201)
+
+    test_weeks = min(2, now_max)
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "new_user_E",
+        "start_date": next_sun.isoformat(),
+        "start_time": "09:00",
+        "end_time": "11:00",
+        "purpose": "新功能_creation vs operation 对比",
+        "weeks": test_weeks
+    }, 201)
+    batch_id = r["batch_id"]
+
+    detail = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_new&operator_role=admin")
+    creation_val = detail["max_recurring_weeks_at_creation"]
+    assert creation_val == now_max, (
+        f"批次max_recurring_weeks_at_creation={creation_val} != 当前now_max={now_max}"
+    )
+    print(f"  [PASS] 批次详情 max_recurring_weeks_at_creation={creation_val} 与配置端点一致")
+
+    logs = requests.get(f"{BASE2}/api/audit", params={"batch_id": batch_id}).json()
+    bc_log = [l for l in logs if l["action"] == "batch_create"][0]
+    assert f"max_recurring_weeks={now_max}" in bc_log["detail"], (
+        f"batch_create审计detail应含max_recurring_weeks={now_max}, 实际={bc_log['detail']}"
+    )
+    print(f"  [PASS] batch_create审计detail含规则值: max_recurring_weeks={now_max}")
+
+    next_mon_far = _next_weekday(0, 70)
+    r2 = api2("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": next_mon_far.isoformat(),
+        "operator_id": "admin_new",
+        "operator_role": "admin",
+        "reason": "对比 creation/operation 规则"
+    })
+    assert r2["max_recurring_weeks_at_creation"] == creation_val
+    assert r2["max_recurring_weeks_at_operation"] == now_max
+    print(f"  [PASS] 改期响应 creation={r2['max_recurring_weeks_at_creation']}, operation={r2['max_recurring_weeks_at_operation']}")
+    if r2["success"] > 0:
+        reschedule_logs = [l for l in requests.get(f"{BASE2}/api/audit", params={"batch_id": batch_id}).json() if l["action"] == "reschedule"]
+        for lg in reschedule_logs:
+            assert "max_recurring_weeks_at_operation=" in lg["detail"]
+        print(f"  [PASS] 每条reschedule审计detail含 max_recurring_weeks_at_operation={now_max}")
+
+    r3 = api2("post", f"/api/bookings/batches/{batch_id}/cancel", {
+        "operator_id": "admin_new",
+        "operator_role": "admin",
+        "reason": "取消验证 creation vs operation"
+    })
+    assert r3["max_recurring_weeks_at_creation"] == creation_val
+    assert r3["max_recurring_weeks_at_operation"] == now_max
+    print(f"  [PASS] 取消响应 creation={r3['max_recurring_weeks_at_creation']}, operation={r3['max_recurring_weeks_at_operation']}")
+
+    export_resp = requests.get(f"{BASE2}/api/bookings/batches/{batch_id}/export", params={
+        "operator_id": "admin_new", "operator_role": "admin"
+    }).json()
+    assert export_resp["config_snapshot"]["max_recurring_weeks_at_creation"] == creation_val
+    assert export_resp["config_snapshot"]["max_recurring_weeks_current"] == now_max
+    print(f"  [PASS] 导出 config_snapshot creation={creation_val}, current={now_max}")
+
+    print(f"  [PASS] 重启/配置切换链路全验证完毕: 批次创建/改期/取消/导出 4个位置都同时保留 creation 与 operation/current 的规则值")
+    return batch_id
+
+
+# ============================================================
+# 测试8: 整批取消后批次查询 - 导出与回查一致
+# ============================================================
+def test_cancel_export_query_consistency(batch_id_cancel):
+    print("\n========== 新功能: 取消后查询/导出一致性验证 ==========")
+
+    r_query = api2("get", f"/api/bookings/batches/{batch_id_cancel}?operator_id=admin_cancel&operator_role=admin")
+    export = requests.get(f"{BASE2}/api/bookings/batches/{batch_id_cancel}/export", params={
+        "operator_id": "admin_cancel", "operator_role": "admin"
+    }).json()
+
+    query_ids = {b["id"]: b for b in r_query["bookings"]}
+    export_ids = {b["id"]: b for b in export["bookings"]}
+    assert set(query_ids.keys()) == set(export_ids.keys()), "取消后导出与查询的预约id集合不一致"
+
+    for bid, qb in query_ids.items():
+        eb = export_ids[bid]
+        assert qb["status"] == eb["status"], f"#{bid} status查询={qb['status']} vs 导出={eb['status']}"
+        assert qb["week_phase"] == eb["week_phase"], f"#{bid} week_phase查询vs导出不一致"
+        assert qb["date"] == eb["date"]
+
+    cancel_logs_query = [l for l in requests.get(f"{BASE2}/api/audit", params={
+        "batch_id": batch_id_cancel, "action": "cancel"
+    }).json()]
+    cancel_ids_query = {l["booking_id"] for l in cancel_logs_query if l["booking_id"]}
+    cancel_ids_export = set()
+    for b in export["bookings"]:
+        for lg in b["audit_logs"]:
+            if lg["action"] == "cancel":
+                bid = lg.get("booking_id") or b["id"]
+                cancel_ids_export.add(bid)
+    if cancel_ids_query:
+        assert cancel_ids_query.issubset(cancel_ids_export), (
+            f"查询中cancel的booking_id={cancel_ids_query} 应都出现在导出cancel={cancel_ids_export}"
+        )
+    print(f"  [PASS] 取消后查询/导出一致: 预约id集合={len(query_ids)}条, 状态/周次完全相同, cancel审计id集合匹配")
+    print(f"    查询cancel_ids: {cancel_ids_query}")
+    print(f"    导出cancel_ids: {cancel_ids_export}")
+
+
+# ============================================================
+# 新功能总入口
+# ============================================================
+_EXPORT_BATCH_IDS = []
+
+
+def run_new_features_tests():
+    global _PASS2, _FAIL2
+    print("\n" + "="*70)
+    print("  新功能回归验证: 批量改期 / 整批取消 / 权限 / 冲突 / 配置切换 / 导出一致性")
+    print("="*70)
+    print(f"  使用服务: {BASE2}")
+
+    room_id, batch_id_A, phases, booking_ids = test_batch_detail_week_phase()
+    test_batch_reschedule_permission_and_protection(room_id, batch_id_A, phases, booking_ids)
+    test_batch_reschedule_partial_conflict()
+    batch_id_cancel = test_batch_cancel_permission_and_roles()
+    batch_id_nothing = test_batch_nothing_to_operate()
+
+    export_bid1 = test_batch_config_switch_restart()
+    test_batch_export_consistency(batch_id_A)
+    test_cancel_export_query_consistency(batch_id_cancel)
+
+    export_data = {
+        "batch_ids_for_after_restart": [batch_id_A, batch_id_cancel, batch_id_nothing, export_bid1],
+    }
+    with open("new_features_restart_data.json", "w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False, indent=2)
+    print(f"  >> 新功能重启前数据已保存到 new_features_restart_data.json: ids={export_data['batch_ids_for_after_restart']}")
+
+    print(f"\n========== 新功能阶段结果: {_PASS2} 通过, {_FAIL2} 失败 ==========")
+    if _FAIL2 > 0:
+        sys.exit(1)
+    print("\n  请重启服务(端口8001)后，运行: python test_sample.py --new-features-after-restart")
+    return export_bid1
+
+
+def load_new_features_restart_ids():
+    try:
+        with open("new_features_restart_data.json", "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data["batch_ids_for_after_restart"]
+    except FileNotFoundError:
+        return []
+
+
+def run_new_features_after_restart():
+    global _PASS2, _FAIL2
+    print("\n" + "="*70)
+    print("  新功能重启后一致性验证")
+    print("="*70)
+
+    ids = load_new_features_restart_ids()
+    if not ids:
+        print("[FAIL] 未找到新功能重启前数据，请先运行 --new-features-before-restart")
+        sys.exit(1)
+    print(f"  >> 加载批次ids: {ids}")
+
+    for bid in ids:
+        detail = api2("get", f"/api/bookings/batches/{bid}?operator_id=admin_new&operator_role=admin")
+        assert detail["id"] == bid
+        creation = detail["max_recurring_weeks_at_creation"]
+        assert 1 <= creation <= 52, f"重启后 creation={creation} 超出范围"
+        for b in detail["bookings"]:
+            assert "week_phase" in b
+            assert b["week_phase"] in {"preserved_in_effect", "preserved_approved", "adjustable", "finished"}
+        print(f"  [PASS] 批次#{bid}重启后: id一致, creation={creation} 合法, week_phase全部存在 ({len(detail['bookings'])}条)")
+
+        export = requests.get(f"{BASE2}/api/bookings/batches/{bid}/export", params={
+            "operator_id": "admin_new", "operator_role": "admin"
+        }).json()
+        assert len(export["bookings"]) == len(detail["bookings"])
+        assert export["batch"]["max_recurring_weeks_at_creation"] == creation
+        audit_q = requests.get(f"{BASE2}/api/audit", params={"batch_id": bid}).json()
+        audit_ids_q = {l["id"] for l in audit_q}
+        audit_ids_e = set()
+        for b in export["bookings"]:
+            for lg in b["audit_logs"]:
+                audit_ids_e.add(lg["id"])
+        for lg in export["batch_level_audit_logs"]:
+            audit_ids_e.add(lg["id"])
+        assert audit_ids_q == audit_ids_e, f"批次#{bid}重启后导出审计id与查询不一致"
+        print(f"  [PASS] 批次#{bid}重启后: 导出详情一致, 审计id一致, 配置快照creation={creation}")
+
+    print(f"\n========== 新功能重启后结果: {_PASS2} 通过, {_FAIL2} 失败 ==========")
+    if _FAIL2 > 0:
+        sys.exit(1)
+
+
 def main():
     global PASS, FAIL
     try:
@@ -1187,6 +1934,31 @@ def main():
             run_after_restart()
         elif len(sys.argv) > 1 and sys.argv[1] == "--before-restart":
             run_before_restart()
+        elif len(sys.argv) > 1 and sys.argv[1] == "--new-features-before-restart":
+            try:
+                run_new_features_tests()
+            except requests.exceptions.ConnectionError:
+                print(f"\n[FAIL] 无法连接 {BASE2}, 请先启动:")
+                print("  python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001")
+                sys.exit(1)
+        elif len(sys.argv) > 1 and sys.argv[1] == "--new-features-after-restart":
+            try:
+                run_new_features_after_restart()
+            except requests.exceptions.ConnectionError:
+                print(f"\n[FAIL] 无法连接 {BASE2}, 请先启动:")
+                print("  python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001")
+                sys.exit(1)
+        elif len(sys.argv) > 1 and sys.argv[1] == "--new-features":
+            try:
+                export_bid1 = run_new_features_tests()
+                print("\n" + "="*60)
+                print("  服务不重启，直接验证新功能重启后一致性...")
+                print("="*60)
+                run_new_features_after_restart()
+            except requests.exceptions.ConnectionError:
+                print(f"\n[FAIL] 无法连接 {BASE2}, 请先启动:")
+                print("  python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001")
+                sys.exit(1)
         else:
             batch_id, batch_before, bookings_before, logs_before = run_before_restart()
 

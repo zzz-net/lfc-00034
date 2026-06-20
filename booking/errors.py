@@ -13,6 +13,11 @@ class ErrorCode(IntEnum):
     INVALID_TIME_RANGE = 10009
     BATCH_LIMIT_EXCEEDED = 10010
     BATCH_NOT_FOUND = 10011
+    BOOKING_ALREADY_IN_EFFECT = 10012
+    BOOKING_APPROVED_PROTECTED = 10013
+    BATCH_NOTHING_TO_OPERATE = 10014
+    NEW_SLOT_NOT_OPEN = 10015
+    NEW_BOOKING_OVERLAP = 10016
 
 
 ERROR_MESSAGES = {
@@ -27,6 +32,11 @@ ERROR_MESSAGES = {
     ErrorCode.INVALID_TIME_RANGE: "start_time must be before end_time",
     ErrorCode.BATCH_LIMIT_EXCEEDED: "Recurring booking weeks exceed the allowed limit",
     ErrorCode.BATCH_NOT_FOUND: "Batch not found",
+    ErrorCode.BOOKING_ALREADY_IN_EFFECT: "Booking is already in effect (date passed or started)",
+    ErrorCode.BOOKING_APPROVED_PROTECTED: "Approved booking cannot be rescheduled, cancel individually instead",
+    ErrorCode.BATCH_NOTHING_TO_OPERATE: "No eligible items in this batch to operate on (all in effect, approved, or already cancelled/rejected/expired)",
+    ErrorCode.NEW_SLOT_NOT_OPEN: "New rescheduled time is not within any open time slot",
+    ErrorCode.NEW_BOOKING_OVERLAP: "New rescheduled time overlaps with an existing approved booking",
 }
 
 

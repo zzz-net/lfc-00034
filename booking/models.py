@@ -22,6 +22,13 @@ VALID_TRANSITIONS = {
 }
 
 
+class BookingWeekPhase(str, Enum):
+    PRESERVED_IN_EFFECT = "preserved_in_effect"
+    PRESERVED_APPROVED = "preserved_approved"
+    ADJUSTABLE = "adjustable"
+    FINISHED = "finished"
+
+
 class RoomCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     description: str = Field(default="", max_length=500)
@@ -99,6 +106,12 @@ class BookingOut(BaseModel):
     updated_at: str
 
 
+class BookingDetailOut(BookingOut):
+    week_phase: BookingWeekPhase
+    old_date: Optional[str] = None
+    rescheduled_from_booking_id: Optional[int] = None
+
+
 class AuditLogOut(BaseModel):
     id: int
     booking_id: Optional[int]
@@ -145,7 +158,7 @@ class BatchOut(BaseModel):
 
 
 class BatchDetailOut(BatchOut):
-    bookings: list[BookingOut]
+    bookings: list[BookingDetailOut]
 
 
 class RecurringConfigOut(BaseModel):
@@ -159,3 +172,45 @@ class RecurringConfigOut(BaseModel):
 class ErrorResponse(BaseModel):
     error_code: int
     message: str
+
+
+class BatchRescheduleCreate(BaseModel):
+    new_start_date: date
+    operator_id: str = Field(..., min_length=1, max_length=50)
+    operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
+    reason: str = Field(default="", max_length=500)
+    new_start_time: Optional[time] = None
+    new_end_time: Optional[time] = None
+
+
+class BatchCancelCreate(BaseModel):
+    operator_id: str = Field(..., min_length=1, max_length=50)
+    operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
+    reason: str = Field(default="", max_length=500)
+
+
+class BatchOperationItem(BaseModel):
+    booking_id: Optional[int] = None
+    old_date: Optional[str] = None
+    new_date: Optional[str] = None
+    old_status: Optional[str] = None
+    new_status: Optional[str] = None
+    result: str
+    error_code: Optional[int] = None
+    message: Optional[str] = None
+    week_phase_before: Optional[str] = None
+
+
+class BatchOperationOut(BaseModel):
+    batch_id: int
+    user_id: str
+    operation: str
+    total: int
+    success: int
+    preserved: int
+    skipped: int
+    denied: int
+    max_recurring_weeks_at_creation: int
+    max_recurring_weeks_at_operation: int
+    items: list[BatchOperationItem]
+    operated_at: str
