@@ -91,6 +91,7 @@ pending ──approve──> approved ──cancel──> cancelled
 | 10006 | INVALID_STATUS_TRANSITION | 当前状态不允许此操作 |
 | 10007 | PERMISSION_DENIED | 无权限（如居民取消他人预约） |
 | 10008 | BOOKING_ALREADY_PROCESSED | 预约已被处理 |
+| 10009 | INVALID_TIME_RANGE | start_time 必须早于 end_time |
 
 所有业务错误返回 HTTP 422，响应体为：
 

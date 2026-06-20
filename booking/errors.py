@@ -10,6 +10,7 @@ class ErrorCode(IntEnum):
     INVALID_STATUS_TRANSITION = 10006
     PERMISSION_DENIED = 10007
     BOOKING_ALREADY_PROCESSED = 10008
+    INVALID_TIME_RANGE = 10009
 
 
 ERROR_MESSAGES = {
@@ -21,6 +22,7 @@ ERROR_MESSAGES = {
     ErrorCode.INVALID_STATUS_TRANSITION: "Invalid status transition for this booking",
     ErrorCode.PERMISSION_DENIED: "You do not have permission to perform this action",
     ErrorCode.BOOKING_ALREADY_PROCESSED: "Booking has already been processed",
+    ErrorCode.INVALID_TIME_RANGE: "start_time must be before end_time",
 }
 
 

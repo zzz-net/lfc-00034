@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from booking.database import get_db, get_db_readonly
 from booking.errors import BookingError, ErrorCode
@@ -57,10 +57,7 @@ def get_room(room_id: int):
     conn = get_db_readonly()
     row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail={
-            "error_code": ErrorCode.ROOM_NOT_FOUND,
-            "message": "Room not found",
-        })
+        raise BookingError(ErrorCode.ROOM_NOT_FOUND)
     return _room_to_out(row)
 
 
@@ -69,10 +66,7 @@ def update_room(room_id: int, body: RoomUpdate):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail={
-                "error_code": ErrorCode.ROOM_NOT_FOUND,
-                "message": "Room not found",
-            })
+            raise BookingError(ErrorCode.ROOM_NOT_FOUND)
         updates = []
         params = []
         if body.name is not None:
@@ -96,18 +90,13 @@ def set_timeslots(room_id: int, body: TimeSlotBatch):
     with get_db() as conn:
         row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
         if not row:
-            raise HTTPException(status_code=404, detail={
-                "error_code": ErrorCode.ROOM_NOT_FOUND,
-                "message": "Room not found",
-            })
+            raise BookingError(ErrorCode.ROOM_NOT_FOUND)
         conn.execute("DELETE FROM time_slots WHERE room_id = ?", (room_id,))
         result = []
         for slot in body.slots:
             if slot.start_time >= slot.end_time:
-                raise HTTPException(status_code=400, detail={
-                    "error_code": 40001,
-                    "message": f"start_time must be before end_time (slot weekday={slot.weekday})",
-                })
+                raise BookingError(ErrorCode.INVALID_TIME_RANGE,
+                                   f"start_time must be before end_time (slot weekday={slot.weekday})")
             cur = conn.execute(
                 "INSERT INTO time_slots (room_id, weekday, start_time, end_time) VALUES (?, ?, ?, ?)",
                 (room_id, slot.weekday, slot.start_time.isoformat(), slot.end_time.isoformat()),
@@ -122,10 +111,7 @@ def get_timeslots(room_id: int):
     conn = get_db_readonly()
     row = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail={
-            "error_code": ErrorCode.ROOM_NOT_FOUND,
-            "message": "Room not found",
-        })
+        raise BookingError(ErrorCode.ROOM_NOT_FOUND)
     rows = conn.execute(
         "SELECT * FROM time_slots WHERE room_id = ? ORDER BY weekday, start_time",
         (room_id,),

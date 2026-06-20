@@ -8,6 +8,8 @@
 脚本会依次执行:
   - 主链路: 配置房间 -> 配置时段 -> 提交预约 -> 审批通过 -> 房间锁定
   - 边界用例: 重叠时段审批失败、居民取消他人预约失败、不在开放时段申请失败
+  - 权限用例: 居民身份审批被拒绝、staff 身份审批成功
+  - 响应格式一致性验证
   - 持久性验证: 查询待审批/已占用/取消记录/审计日志
 """
 
@@ -24,6 +26,14 @@ PASS = 0
 FAIL = 0
 
 
+def get_err_code(resp_json: dict) -> int:
+    if "error_code" in resp_json:
+        return resp_json["error_code"]
+    if isinstance(resp_json.get("detail"), dict):
+        return resp_json["detail"].get("error_code", 0)
+    return 0
+
+
 def api(method: str, path: str, data: dict | None = None, expect_status: int = 200) -> dict:
     url = f"{BASE}{path}"
     resp = getattr(requests, method)(url, json=data)
@@ -37,7 +47,82 @@ def api(method: str, path: str, data: dict | None = None, expect_status: int = 2
     print(f"  {tag} {method.upper()} {path} => {resp.status_code} (expect {expect_status})")
     if not ok:
         print(f"    response: {resp.text[:300]}")
-    return resp.json()
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        return {}
+
+
+def test_error_response_consistency():
+    global PASS, FAIL
+    print("\n========== 错误响应格式一致性验证 ==========")
+    r = requests.post(f"{BASE}/api/bookings/99999/approve", json={
+        "operator_id": "admin1",
+        "operator_role": "admin",
+        "reason": ""
+    })
+    data = r.json()
+    assert "error_code" in data, f"Response missing top-level error_code: {data}"
+    assert "message" in data, f"Response missing top-level message: {data}"
+    assert "detail" not in data, f"Response should NOT have 'detail' wrapper: {data}"
+    PASS += 1
+    print(f"  [PASS] Error response format is {{error_code, message}} (no detail wrapper)")
+
+
+def test_non_admin_approval_rejected():
+    print("\n========== 非管理员审批被拒绝 ==========")
+
+    r = api("post", "/api/rooms", {"name": "乒乓球室", "description": "二楼活动室"}, 201)
+    room_id = r["id"]
+
+    from datetime import date, timedelta
+    next_tuesday = date.today() + timedelta(days=(7 - date.today().weekday() + 1) % 7)
+    if next_tuesday == date.today():
+        next_tuesday += timedelta(days=7)
+    weekday_1 = next_tuesday.weekday()
+    booking_date = next_tuesday.isoformat()
+
+    api("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": weekday_1, "start_time": "10:00", "end_time": "20:00"}]
+    }, 201)
+
+    r = api("post", "/api/bookings", {
+        "room_id": room_id,
+        "user_id": "zhaoliu",
+        "date": booking_date,
+        "start_time": "10:00",
+        "end_time": "12:00",
+        "purpose": "乒乓球比赛"
+    }, 201)
+    booking_id = r["id"]
+
+    r = api("post", f"/api/bookings/{booking_id}/approve", {
+        "operator_id": "zhaoliu",
+        "operator_role": "resident",
+        "reason": "同意"
+    }, 422)
+    err_code = get_err_code(r)
+    assert err_code == 10007, f"Expected 10007 (PERMISSION_DENIED), got {err_code}. Response: {r}"
+    print(f"  [PASS] resident 审批被拒绝, error_code={err_code}")
+
+    r = api("post", f"/api/bookings/{booking_id}/reject", {
+        "operator_id": "zhaoliu",
+        "operator_role": "resident",
+        "reason": "驳回"
+    }, 422)
+    err_code = get_err_code(r)
+    assert err_code == 10007, f"Expected 10007 (PERMISSION_DENIED), got {err_code}. Response: {r}"
+    print(f"  [PASS] resident 驳回被拒绝, error_code={err_code}")
+
+    r = api("post", f"/api/bookings/{booking_id}/approve", {
+        "operator_id": "staff1",
+        "operator_role": "staff",
+        "reason": "同意"
+    })
+    assert r["status"] == "approved", f"Expected approved, got {r['status']}"
+    print(f"  [PASS] staff 审批成功, status={r['status']}")
+
+    return room_id, booking_id, booking_date
 
 
 def test_main_flow():
@@ -122,7 +207,7 @@ def test_overlap_approval(room_id, booking_date):
         "operator_role": "admin",
         "reason": ""
     }, 422)
-    err_code = r.get("error_code", r.get("detail", {}).get("error_code", 0))
+    err_code = get_err_code(r)
     assert err_code == 10004, f"Expected error_code 10004 (BOOKING_OVERLAP), got {err_code}"
     print(f"  [PASS] 重叠审批被拒绝, error_code={err_code}")
 
@@ -135,7 +220,7 @@ def test_cancel_others_booking(booking_id):
         "operator_role": "resident",
         "reason": "我想取消"
     }, 422)
-    err_code = r.get("error_code", r.get("detail", {}).get("error_code", 0))
+    err_code = get_err_code(r)
     assert err_code == 10007, f"Expected error_code 10007 (PERMISSION_DENIED), got {err_code}"
     print(f"  [PASS] 居民无法取消他人预约, error_code={err_code}")
 
@@ -157,7 +242,7 @@ def test_outside_open_hours(room_id):
         "end_time": "13:00",
         "purpose": "午间活动"
     }, 422)
-    err_code = r.get("error_code", r.get("detail", {}).get("error_code", 0))
+    err_code = get_err_code(r)
     assert err_code == 10003, f"Expected error_code 10003 (SLOT_NOT_OPEN), got {err_code}"
     print(f"  [PASS] 不在开放时段被拒绝, error_code={err_code}")
 
@@ -204,10 +289,12 @@ def test_persistence(room_id, booking_id):
 def main():
     global PASS, FAIL
     try:
+        test_error_response_consistency()
         room_id, booking_id, booking_date = test_main_flow()
         test_overlap_approval(room_id, booking_date)
         test_cancel_others_booking(booking_id)
         test_outside_open_hours(room_id)
+        test_non_admin_approval_rejected()
         test_persistence(room_id, booking_id)
     except requests.exceptions.ConnectionError:
         print("\n[FAIL] 无法连接服务, 请先启动:")

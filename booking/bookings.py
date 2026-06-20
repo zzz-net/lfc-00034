@@ -1,6 +1,6 @@
 from datetime import date, time, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from booking.database import get_db, get_db_readonly
 from booking.errors import BookingError, ErrorCode
@@ -13,6 +13,8 @@ from booking.models import (
 )
 
 router = APIRouter(prefix="/api/bookings", tags=["bookings"])
+
+APPROVAL_ROLES = {"admin", "staff"}
 
 
 def _booking_to_out(row) -> dict:
@@ -69,6 +71,12 @@ def _check_overlap(conn, room_id: int, booking_date: str, start_time: str, end_t
                            f"Overlaps with approved booking #{overlap['id']}")
 
 
+def _check_approval_permission(operator_role: str):
+    if operator_role not in APPROVAL_ROLES:
+        raise BookingError(ErrorCode.PERMISSION_DENIED,
+                           f"Only {sorted(APPROVAL_ROLES)} can approve or reject bookings")
+
+
 def _write_audit(conn, booking_id: int, action: str, old_status: str | None,
                  new_status: str | None, operator_id: str, operator_role: str, detail: str):
     conn.execute(
@@ -85,42 +93,33 @@ def create_booking(body: BookingCreate):
     end_str = body.end_time.isoformat()
 
     if body.start_time >= body.end_time:
-        raise HTTPException(status_code=400, detail={
-            "error_code": 40001,
-            "message": "start_time must be before end_time",
-        })
+        raise BookingError(ErrorCode.INVALID_TIME_RANGE)
 
-    try:
-        with get_db() as conn:
-            room = conn.execute("SELECT * FROM rooms WHERE id = ?", (body.room_id,)).fetchone()
-            if not room:
-                raise BookingError(ErrorCode.ROOM_NOT_FOUND)
-            if not room["is_active"]:
-                raise BookingError(ErrorCode.ROOM_INACTIVE)
+    with get_db() as conn:
+        room = conn.execute("SELECT * FROM rooms WHERE id = ?", (body.room_id,)).fetchone()
+        if not room:
+            raise BookingError(ErrorCode.ROOM_NOT_FOUND)
+        if not room["is_active"]:
+            raise BookingError(ErrorCode.ROOM_INACTIVE)
 
-            _check_slot_open(conn, body.room_id, date_str, start_str, end_str)
-            _check_overlap(conn, body.room_id, date_str, start_str, end_str)
+        _check_slot_open(conn, body.room_id, date_str, start_str, end_str)
+        _check_overlap(conn, body.room_id, date_str, start_str, end_str)
 
-            cur = conn.execute(
-                """INSERT INTO bookings (room_id, user_id, date, start_time, end_time, purpose)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (body.room_id, body.user_id, date_str, start_str, end_str, body.purpose),
-            )
-            booking_id = cur.lastrowid
+        cur = conn.execute(
+            """INSERT INTO bookings (room_id, user_id, date, start_time, end_time, purpose)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (body.room_id, body.user_id, date_str, start_str, end_str, body.purpose),
+        )
+        booking_id = cur.lastrowid
 
-            _write_audit(conn, booking_id, "create", None, "pending",
-                         body.user_id, "resident", body.purpose)
+        _write_audit(conn, booking_id, "create", None, "pending",
+                     body.user_id, "resident", body.purpose)
 
-            row = conn.execute(
-                """SELECT b.*, r.name as room_name FROM bookings b
-                   JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
-                (booking_id,),
-            ).fetchone()
-    except BookingError as e:
-        raise HTTPException(status_code=422, detail={
-            "error_code": e.code,
-            "message": e.message,
-        })
+        row = conn.execute(
+            """SELECT b.*, r.name as room_name FROM bookings b
+               JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
+            (booking_id,),
+        ).fetchone()
     return _booking_to_out(row)
 
 
@@ -166,118 +165,99 @@ def get_booking(booking_id: int):
         (booking_id,),
     ).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail={
-            "error_code": ErrorCode.BOOKING_NOT_FOUND,
-            "message": "Booking not found",
-        })
+        raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
     return _booking_to_out(row)
 
 
 @router.post("/{booking_id}/approve", response_model=BookingOut)
 def approve_booking(booking_id: int, body: BookingAction):
-    try:
-        with get_db() as conn:
-            row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
-            if not row:
-                raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
-            current = BookingStatus(row["status"])
-            if current != BookingStatus.PENDING:
-                if current == BookingStatus.APPROVED:
-                    raise BookingError(ErrorCode.BOOKING_ALREADY_PROCESSED,
-                                       "Booking is already approved")
-                raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
-                                   f"Cannot approve a booking with status '{current.value}'")
+    _check_approval_permission(body.operator_role)
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        if not row:
+            raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
+        current = BookingStatus(row["status"])
+        if current != BookingStatus.PENDING:
+            if current == BookingStatus.APPROVED:
+                raise BookingError(ErrorCode.BOOKING_ALREADY_PROCESSED,
+                                   "Booking is already approved")
+            raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
+                               f"Cannot approve a booking with status '{current.value}'")
 
-            _check_overlap(conn, row["room_id"], row["date"], row["start_time"], row["end_time"],
-                           exclude_id=booking_id)
+        _check_overlap(conn, row["room_id"], row["date"], row["start_time"], row["end_time"],
+                       exclude_id=booking_id)
 
-            conn.execute(
-                "UPDATE bookings SET status = 'approved', updated_at = datetime('now','localtime') WHERE id = ?",
-                (booking_id,),
-            )
-            _write_audit(conn, booking_id, "approve", "pending", "approved",
-                         body.operator_id, body.operator_role, body.reason)
+        conn.execute(
+            "UPDATE bookings SET status = 'approved', updated_at = datetime('now','localtime') WHERE id = ?",
+            (booking_id,),
+        )
+        _write_audit(conn, booking_id, "approve", "pending", "approved",
+                     body.operator_id, body.operator_role, body.reason)
 
-            result = conn.execute(
-                """SELECT b.*, r.name as room_name FROM bookings b
-                   JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
-                (booking_id,),
-            ).fetchone()
-    except BookingError as e:
-        raise HTTPException(status_code=422, detail={
-            "error_code": e.code,
-            "message": e.message,
-        })
+        result = conn.execute(
+            """SELECT b.*, r.name as room_name FROM bookings b
+               JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
+            (booking_id,),
+        ).fetchone()
     return _booking_to_out(result)
 
 
 @router.post("/{booking_id}/reject", response_model=BookingOut)
 def reject_booking(booking_id: int, body: BookingAction):
-    try:
-        with get_db() as conn:
-            row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
-            if not row:
-                raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
-            current = BookingStatus(row["status"])
-            if current != BookingStatus.PENDING:
-                raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
-                                   f"Cannot reject a booking with status '{current.value}'")
+    _check_approval_permission(body.operator_role)
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        if not row:
+            raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
+        current = BookingStatus(row["status"])
+        if current != BookingStatus.PENDING:
+            raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
+                               f"Cannot reject a booking with status '{current.value}'")
 
-            conn.execute(
-                "UPDATE bookings SET status = 'rejected', updated_at = datetime('now','localtime') WHERE id = ?",
-                (booking_id,),
-            )
-            _write_audit(conn, booking_id, "reject", "pending", "rejected",
-                         body.operator_id, body.operator_role, body.reason)
+        conn.execute(
+            "UPDATE bookings SET status = 'rejected', updated_at = datetime('now','localtime') WHERE id = ?",
+            (booking_id,),
+        )
+        _write_audit(conn, booking_id, "reject", "pending", "rejected",
+                     body.operator_id, body.operator_role, body.reason)
 
-            result = conn.execute(
-                """SELECT b.*, r.name as room_name FROM bookings b
-                   JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
-                (booking_id,),
-            ).fetchone()
-    except BookingError as e:
-        raise HTTPException(status_code=422, detail={
-            "error_code": e.code,
-            "message": e.message,
-        })
+        result = conn.execute(
+            """SELECT b.*, r.name as room_name FROM bookings b
+               JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
+            (booking_id,),
+        ).fetchone()
     return _booking_to_out(result)
 
 
 @router.post("/{booking_id}/cancel", response_model=BookingOut)
 def cancel_booking(booking_id: int, body: BookingAction):
-    try:
-        with get_db() as conn:
-            row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
-            if not row:
-                raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
-            current = BookingStatus(row["status"])
-            target = BookingStatus.CANCELLED
+    with get_db() as conn:
+        row = conn.execute("SELECT * FROM bookings WHERE id = ?", (booking_id,)).fetchone()
+        if not row:
+            raise BookingError(ErrorCode.BOOKING_NOT_FOUND)
+        current = BookingStatus(row["status"])
+        target = BookingStatus.CANCELLED
 
-            if target not in VALID_TRANSITIONS.get(current, set()):
-                raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
-                                   f"Cannot cancel a booking with status '{current.value}'")
+        if target not in VALID_TRANSITIONS.get(current, set()):
+            raise BookingError(ErrorCode.INVALID_STATUS_TRANSITION,
+                               f"Cannot cancel a booking with status '{current.value}'")
 
-            if body.operator_role == "resident" and row["user_id"] != body.operator_id:
-                raise BookingError(ErrorCode.PERMISSION_DENIED,
-                                   "Residents can only cancel their own bookings")
+        if body.operator_role == "resident" and row["user_id"] != body.operator_id:
+            raise BookingError(ErrorCode.PERMISSION_DENIED,
+                               "Residents can only cancel their own bookings")
 
-            conn.execute(
-                "UPDATE bookings SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ?",
-                (booking_id,),
-            )
-            _write_audit(conn, booking_id, "cancel", current.value, "cancelled",
-                         body.operator_id, body.operator_role, body.reason)
+        conn.execute(
+            "UPDATE bookings SET status = 'cancelled', updated_at = datetime('now','localtime') WHERE id = ?",
+            (booking_id,),
+        )
+        _write_audit(conn, booking_id, "cancel", current.value, "cancelled",
+                     body.operator_id, body.operator_role, body.reason)
 
-            result = conn.execute(
-                """SELECT b.*, r.name as room_name FROM bookings b
-                   JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
-                (booking_id,),
-            ).fetchone()
-    except BookingError as e:
-        raise HTTPException(status_code=422, detail={
-            "error_code": e.code,
-            "message": e.message,
-        })
+        result = conn.execute(
+            """SELECT b.*, r.name as room_name FROM bookings b
+               JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
+            (booking_id,),
+        ).fetchone()
     return _booking_to_out(result)
 
 
