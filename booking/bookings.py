@@ -373,7 +373,8 @@ def approve_booking(booking_id: int, body: BookingAction):
             (booking_id,),
         )
         _write_audit(conn, booking_id, "approve", "pending", "approved",
-                     body.operator_id, body.operator_role, body.reason)
+                     body.operator_id, body.operator_role, body.reason,
+                     batch_id=row["batch_id"])
 
         result = conn.execute(
             """SELECT b.*, r.name as room_name FROM bookings b
@@ -400,7 +401,8 @@ def reject_booking(booking_id: int, body: BookingAction):
             (booking_id,),
         )
         _write_audit(conn, booking_id, "reject", "pending", "rejected",
-                     body.operator_id, body.operator_role, body.reason)
+                     body.operator_id, body.operator_role, body.reason,
+                     batch_id=row["batch_id"])
 
         result = conn.execute(
             """SELECT b.*, r.name as room_name FROM bookings b
@@ -432,7 +434,8 @@ def cancel_booking(booking_id: int, body: BookingAction):
             (booking_id,),
         )
         _write_audit(conn, booking_id, "cancel", current.value, "cancelled",
-                     body.operator_id, body.operator_role, body.reason)
+                     body.operator_id, body.operator_role, body.reason,
+                     batch_id=row["batch_id"])
 
         result = conn.execute(
             """SELECT b.*, r.name as room_name FROM bookings b
@@ -463,7 +466,8 @@ def expire_bookings():
                 (row["id"],),
             )
             _write_audit(conn, row["id"], "expire", "approved", "expired",
-                         "system", "system", "Auto-expired past booking")
+                         "system", "system", "Auto-expired past booking",
+                         batch_id=row["batch_id"])
             count += 1
 
     return {"expired_count": count}

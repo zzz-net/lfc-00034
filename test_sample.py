@@ -292,6 +292,7 @@ def test_persistence(room_id, booking_id):
 def test_recurring_booking_partial_success():
     print("\n========== 周期预约 - 部分成功部分冲突测试 ==========")
     from datetime import date, timedelta
+    from booking import MAX_RECURRING_WEEKS
 
     r = api("post", "/api/rooms", {"name": "多功能厅", "description": "三楼多功能厅"}, 201)
     room_id = r["id"]
@@ -324,7 +325,8 @@ def test_recurring_booking_partial_success():
     assert r["status"] == "approved"
     print(f"  >> 先创建并审批一个单次预约 #{single_booking_id} 造成冲突")
 
-    third_monday = next_monday + timedelta(weeks=2)
+    test_weeks = min(2, MAX_RECURRING_WEEKS)
+    second_monday = next_monday + timedelta(weeks=1)
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
         "user_id": "lisi",
@@ -332,15 +334,15 @@ def test_recurring_booking_partial_success():
         "start_time": "09:00",
         "end_time": "11:00",
         "purpose": "每周一例会",
-        "weeks": 3
+        "weeks": test_weeks
     }, 201)
 
     batch_id = r["batch_id"]
-    print(f"  >> 创建周期预约 batch_id={batch_id}, 共3周")
+    print(f"  >> 创建周期预约 batch_id={batch_id}, 共{test_weeks}周")
     print(f"  >> 统计: total={r['total']}, success={r['success']}, skipped={r['skipped']}, denied={r['denied']}")
 
-    assert r["total"] == 3
-    assert r["success"] == 2
+    assert r["total"] == test_weeks
+    assert r["success"] == test_weeks - 1
     assert r["skipped"] == 1
     assert r["denied"] == 0
 
@@ -350,7 +352,7 @@ def test_recurring_booking_partial_success():
     print(f"  >> 冲突跳过日期: {skipped_dates}")
 
     assert booking_date in skipped_dates
-    assert third_monday.isoformat() in success_dates
+    assert second_monday.isoformat() in success_dates
 
     success_items = [item for item in r["items"] if item["status"] == "success"]
     for item in success_items:
@@ -361,12 +363,13 @@ def test_recurring_booking_partial_success():
         assert item["booking_id"] is None
 
     print(f"  [PASS] 周期预约部分成功部分冲突验证通过")
-    return room_id, batch_id, success_items[0]["booking_id"], third_monday.isoformat()
+    return room_id, batch_id, success_items[0]["booking_id"], second_monday.isoformat()
 
 
 def test_recurring_booking_permission():
     print("\n========== 周期预约 - 居民只能操作自己的批次测试 ==========")
     from datetime import date, timedelta
+    from booking import MAX_RECURRING_WEEKS
 
     r = api("post", "/api/rooms", {"name": "钢琴室", "description": "四楼钢琴室"}, 201)
     room_id = r["id"]
@@ -380,6 +383,7 @@ def test_recurring_booking_permission():
         "slots": [{"weekday": weekday_1, "start_time": "14:00", "end_time": "18:00"}]
     }, 201)
 
+    test_weeks = min(1, MAX_RECURRING_WEEKS)
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
         "user_id": "zhangsan",
@@ -387,7 +391,7 @@ def test_recurring_booking_permission():
         "start_time": "14:00",
         "end_time": "16:00",
         "purpose": "钢琴练习",
-        "weeks": 2
+        "weeks": test_weeks
     }, 201)
     batch_id = r["batch_id"]
     print(f"  >> zhangsan 创建周期预约 batch_id={batch_id}")
@@ -413,6 +417,7 @@ def test_recurring_booking_permission():
 def test_recurring_booking_approval_lock():
     print("\n========== 周期预约 - 审批后锁定冲突时段测试 ==========")
     from datetime import date, timedelta
+    from booking import MAX_RECURRING_WEEKS
 
     r = api("post", "/api/rooms", {"name": "羽毛球室", "description": "地下羽毛球场"}, 201)
     room_id = r["id"]
@@ -426,6 +431,7 @@ def test_recurring_booking_approval_lock():
         "slots": [{"weekday": weekday_2, "start_time": "18:00", "end_time": "22:00"}]
     }, 201)
 
+    test_weeks = min(2, MAX_RECURRING_WEEKS)
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
         "user_id": "wangwu",
@@ -433,7 +439,7 @@ def test_recurring_booking_approval_lock():
         "start_time": "19:00",
         "end_time": "21:00",
         "purpose": "羽毛球训练",
-        "weeks": 2
+        "weeks": test_weeks
     }, 201)
     batch_id = r["batch_id"]
     print(f"  >> wangwu 创建周期预约 batch_id={batch_id}")
@@ -509,6 +515,7 @@ def test_recurring_booking_approval_lock():
 def test_recurring_booking_batch_limit():
     print("\n========== 周期预约 - 配置超限测试 ==========")
     from datetime import date, timedelta
+    from booking import MAX_RECURRING_WEEKS
 
     r = api("post", "/api/rooms", {"name": "棋牌室", "description": "二楼棋牌室"}, 201)
     room_id = r["id"]
@@ -522,6 +529,7 @@ def test_recurring_booking_batch_limit():
         "slots": [{"weekday": weekday_3, "start_time": "09:00", "end_time": "18:00"}]
     }, 201)
 
+    too_many_weeks = MAX_RECURRING_WEEKS + 10
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
         "user_id": "qianqi",
@@ -529,11 +537,11 @@ def test_recurring_booking_batch_limit():
         "start_time": "09:00",
         "end_time": "12:00",
         "purpose": "棋牌活动",
-        "weeks": 10
+        "weeks": too_many_weeks
     }, 422)
     err_code = get_err_code(r)
     assert err_code == 10010
-    print(f"  [PASS] 超过最大周数限制被拒绝, error_code={err_code}")
+    print(f"  [PASS] weeks={too_many_weeks} 超过上限 {MAX_RECURRING_WEEKS} 被拒绝, error_code={err_code}")
 
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
@@ -542,76 +550,195 @@ def test_recurring_booking_batch_limit():
         "start_time": "09:00",
         "end_time": "12:00",
         "purpose": "棋牌活动",
-        "weeks": 4
+        "weeks": MAX_RECURRING_WEEKS
     }, 201)
-    assert r["total"] == 4
-    assert r["success"] == 4
-    print(f"  [PASS] 4周预约成功")
+    assert r["total"] == MAX_RECURRING_WEEKS
+    assert r["success"] == MAX_RECURRING_WEEKS
+    print(f"  [PASS] weeks={MAX_RECURRING_WEEKS} 预约成功")
 
     print(f"  [PASS] 配置超限验证通过")
 
 
-def test_recurring_booking_audit_and_persistence():
-    print("\n========== 周期预约 - 审计日志与重启后一致性测试 ==========")
+def test_recurring_booking_audit_chain():
+    print("\n========== 周期预约 - 审批/取消后审计链不中断测试 ==========")
     from datetime import date, timedelta
+    from booking import MAX_RECURRING_WEEKS
 
-    r = api("post", "/api/rooms", {"name": "书画室", "description": "五楼书画室"}, 201)
+    r = api("post", "/api/rooms", {"name": "画室", "description": "七楼画室"}, 201)
     room_id = r["id"]
 
-    next_friday = date.today() + timedelta(days=(7 - date.today().weekday() + 4) % 7)
-    if next_friday == date.today():
-        next_friday += timedelta(days=7)
-    weekday_4 = next_friday.weekday()
+    next_sunday = date.today() + timedelta(days=(7 - date.today().weekday() + 6) % 7)
+    if next_sunday == date.today():
+        next_sunday += timedelta(days=7)
+    weekday_6 = next_sunday.weekday()
 
     api("post", f"/api/rooms/{room_id}/timeslots", {
-        "slots": [{"weekday": weekday_4, "start_time": "09:00", "end_time": "17:00"}]
+        "slots": [{"weekday": weekday_6, "start_time": "09:00", "end_time": "18:00"}]
     }, 201)
 
+    test_weeks = min(3, MAX_RECURRING_WEEKS)
     r = api("post", "/api/bookings/recurring", {
         "room_id": room_id,
-        "user_id": "sunba",
-        "start_date": next_friday.isoformat(),
+        "user_id": "wu_shiyi",
+        "start_date": next_sunday.isoformat(),
         "start_time": "10:00",
         "end_time": "12:00",
-        "purpose": "书法练习",
-        "weeks": 2
+        "purpose": "绘画课程",
+        "weeks": test_weeks
     }, 201)
     batch_id = r["batch_id"]
-    booking_ids = [item["booking_id"] for item in r["items"] if item["status"] == "success"]
-    print(f"  >> 创建周期预约 batch_id={batch_id}, booking_ids={booking_ids}")
+    success_items = [item for item in r["items"] if item["status"] == "success"]
+    assert len(success_items) == test_weeks
+
+    if test_weeks >= 2:
+        bid_approve = success_items[0]["booking_id"]
+        bid_reject = success_items[1]["booking_id"]
+        bid_cancel = success_items[0]["booking_id"] if test_weeks == 2 else success_items[2]["booking_id"]
+    else:
+        bid_approve = success_items[0]["booking_id"]
+        bid_reject = None
+        bid_cancel = success_items[0]["booking_id"]
+
+    booking_ids_display = [b["booking_id"] for b in success_items]
+    print(f"  >> 创建周期预约 batch_id={batch_id}, 子预约: {booking_ids_display}")
 
     r = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id})
-    logs = r.json()
-    print(f"  >> 批次审计日志: {len(logs)} 条")
-    assert len(logs) >= 3
+    logs_before = r.json()
+    print(f"  >> 操作前批次审计日志: {len(logs_before)} 条, actions={[l['action'] for l in logs_before]}")
+    assert len(logs_before) == test_weeks + 1  # 1 batch_create + test_weeks create
 
-    actions = [log["action"] for log in logs]
-    assert "batch_create" in actions
-    assert actions.count("create") == 2
-    for log in logs:
-        assert log["batch_id"] == batch_id
-    print(f"  >> 审计日志操作序列: {actions}")
+    api("post", f"/api/bookings/{bid_approve}/approve", {
+        "operator_id": "admin1",
+        "operator_role": "admin",
+        "reason": "同意绘画课程"
+    })
+    print(f"  >> 审批通过 #{bid_approve}")
 
-    for bid in booking_ids:
+    extra_actions = ["approve"]
+    if bid_reject is not None:
+        api("post", f"/api/bookings/{bid_reject}/reject", {
+            "operator_id": "admin1",
+            "operator_role": "admin",
+            "reason": "时段不合适"
+        })
+        print(f"  >> 审批驳回 #{bid_reject}")
+        extra_actions.append("reject")
+
+    api("post", f"/api/bookings/{bid_cancel}/cancel", {
+        "operator_id": "wu_shiyi",
+        "operator_role": "resident",
+        "reason": "本周不去了"
+    })
+    print(f"  >> 居民取消 #{bid_cancel}")
+    extra_actions.append("cancel")
+
+    r = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id})
+    logs_after = r.json()
+    actions_after = [log["action"] for log in logs_after]
+    print(f"  >> 操作后批次审计日志: {len(logs_after)} 条, actions={actions_after}")
+
+    expected_log_count = test_weeks + 1 + len(extra_actions)
+    assert len(logs_after) == expected_log_count, (
+        f"期望 {expected_log_count} 条日志, 实际 {len(logs_after)} 条"
+    )
+    assert actions_after.count("create") == test_weeks
+    for act in extra_actions:
+        assert act in actions_after, f"缺少 {act} 审计日志"
+
+    for log in logs_after:
+        assert log["batch_id"] == batch_id, (
+            f"Log #{log['id']} action={log['action']} batch_id={log['batch_id']} "
+            f"should be {batch_id}"
+        )
+    print(f"  [PASS] 所有{len(logs_after)}条审计日志(含{extra_actions})都正确关联了 batch_id={batch_id}")
+
+    check_bids = {bid_approve, bid_cancel}
+    if bid_reject is not None:
+        check_bids.add(bid_reject)
+    for bid in check_bids:
         r = requests.get(f"{BASE}/api/audit", params={"booking_id": bid})
-        booking_logs = r.json()
-        assert len(booking_logs) >= 1
-        assert booking_logs[0]["batch_id"] == batch_id
-    print(f"  [PASS] 每条子预约的审计日志也关联了 batch_id")
+        per_booking = r.json()
+        for log in per_booking:
+            assert log["batch_id"] == batch_id
+    print(f"  [PASS] 按 booking_id 查询, 每条预约的所有日志都关联 batch_id")
 
     r = requests.get(f"{BASE}/api/audit/export", params={"batch_id": batch_id})
     exported = r.json()
-    assert len(exported) == len(logs)
-    print(f"  [PASS] 按批次导出审计日志成功, 数量一致")
+    assert len(exported) == len(logs_after)
+    for log in exported:
+        assert log["batch_id"] == batch_id
+    print(f"  [PASS] 按 batch_id 导出审计日志, 所有 {len(exported)} 条都关联 batch_id")
 
     batch_before = api("get", f"/api/bookings/batches/{batch_id}?operator_id=admin1&operator_role=admin")
     bookings_before = api("get", f"/api/bookings", params={"batch_id": batch_id})
-    logs_before = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id}).json()
+    logs_before_full = requests.get(f"{BASE}/api/audit", params={"batch_id": batch_id}).json()
 
-    print(f"  >> 重启前: batch={batch_before['id']}, bookings={len(bookings_before)}, logs={len(logs_before)}")
+    print(f"  >> 重启前快照: batch={batch_before['id']}, bookings={len(bookings_before)}, logs={len(logs_before_full)}")
+    print(f"  [PASS] 审计链不中断验证通过")
+    return batch_id, batch_before, bookings_before, logs_before_full
 
-    print(f"  [PASS] 审计日志与持久性预验证通过")
-    return batch_id, batch_before, bookings_before, logs_before
+
+def test_recurring_booking_config_from_env():
+    print("\n========== 周期预约 - 配置从环境变量读取测试 ==========")
+    import os
+    from booking import MAX_RECURRING_WEEKS
+
+    env_val = os.environ.get("BOOKING_MAX_RECURRING_WEEKS")
+    print(f"  >> BOOKING_MAX_RECURRING_WEEKS 环境变量: {env_val!r}")
+    print(f"  >> 当前 MAX_RECURRING_WEEKS = {MAX_RECURRING_WEEKS}")
+
+    if env_val:
+        try:
+            expected = max(1, int(env_val))
+        except (ValueError, TypeError):
+            expected = 4
+    else:
+        expected = 4
+
+    assert MAX_RECURRING_WEEKS == expected, (
+        f"MAX_RECURRING_WEEKS={MAX_RECURRING_WEEKS} != expected={expected}"
+    )
+    print(f"  [PASS] MAX_RECURRING_WEEKS 正确从环境变量读取: {MAX_RECURRING_WEEKS}")
+
+    from datetime import date, timedelta
+    r = api("post", "/api/rooms", {"name": "体操室", "description": "八楼体操室"}, 201)
+    room_id = r["id"]
+
+    next_day = date.today() + timedelta(days=1)
+    weekday = next_day.weekday()
+    api("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": weekday, "start_time": "09:00", "end_time": "20:00"}]
+    }, 201)
+
+    too_many = MAX_RECURRING_WEEKS + 1
+    r = api("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "zhao_shier",
+        "start_date": next_day.isoformat(),
+        "start_time": "10:00",
+        "end_time": "11:00",
+        "purpose": "体操",
+        "weeks": too_many
+    }, 422)
+    err_code = get_err_code(r)
+    assert err_code == 10010
+    print(f"  [PASS] weeks={too_many} 超过上限 {MAX_RECURRING_WEEKS}, 被拒绝, error_code={err_code}")
+
+    exact_limit = MAX_RECURRING_WEEKS
+    r = api("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "user_id": "zhao_shier",
+        "start_date": next_day.isoformat(),
+        "start_time": "10:00",
+        "end_time": "11:00",
+        "purpose": "体操",
+        "weeks": exact_limit
+    }, 201)
+    assert r["total"] == exact_limit
+    print(f"  [PASS] weeks={exact_limit} 正好等于上限, 创建成功")
+
+    print(f"  [PASS] 配置从环境变量读取并生效验证通过")
+
 
 
 def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before, logs_before):
@@ -646,10 +773,25 @@ def test_recurring_booking_after_restart(batch_id, batch_before, bookings_before
         assert before["id"] == after["id"]
         assert before["action"] == after["action"]
         assert before["batch_id"] == after["batch_id"]
-    print(f"  [PASS] 审计日志查询和导出重启后一致")
 
-    r = api("get", f"/api/bookings/batches", params={"user_id": "sunba"})
-    assert any(b["id"] == batch_id for b in r)
+    actions_after = [log["action"] for log in logs_after]
+    print(f"  >> 重启后审计日志 action: {actions_after}")
+    assert "batch_create" in actions_after, "重启后缺少 batch_create 审计日志"
+    assert actions_after.count("create") >= 1, "重启后缺少 create 审计日志"
+    assert "approve" in actions_after, "重启后缺少 approve 审计日志"
+    assert "cancel" in actions_after, "重启后缺少 cancel 审计日志"
+    if actions_after.count("create") >= 2:
+        assert "reject" in actions_after, "重启后缺少 reject 审计日志"
+    for log in logs_after:
+        assert log["batch_id"] == batch_id, (
+            f"重启后 Log #{log['id']} batch_id={log['batch_id']} 不等于 {batch_id}"
+        )
+    print(f"  [PASS] 审计日志查询和导出重启后一致(含 approve/cancel, reject 如有)")
+
+    r = api("get", f"/api/bookings/batches", params={"user_id": "wu_shiyi"})
+    assert any(b["id"] == batch_id for b in r), (
+        f"批次列表中找不到 batch_id={batch_id}"
+    )
     print(f"  [PASS] 批次列表查询正常")
 
     print(f"  [PASS] 重启后一致性验证通过")
@@ -743,11 +885,12 @@ def run_before_restart():
     test_non_admin_approval_rejected()
     test_persistence(room_id, booking_id)
 
+    test_recurring_booking_config_from_env()
     test_recurring_booking_partial_success()
     test_recurring_booking_permission()
     test_recurring_booking_approval_lock()
     test_recurring_booking_batch_limit()
-    batch_id, batch_before, bookings_before, logs_before = test_recurring_booking_audit_and_persistence()
+    batch_id, batch_before, bookings_before, logs_before = test_recurring_booking_audit_chain()
     test_single_booking_still_works()
 
     save_restart_data(batch_id, batch_before, bookings_before, logs_before)

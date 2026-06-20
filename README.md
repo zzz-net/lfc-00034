@@ -151,7 +151,7 @@ curl -X POST http://127.0.0.1:8000/api/bookings \
   }'
 ```
 
-### 4. 审批通过
+### 7. 审批通过
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/bookings/1/approve \
@@ -159,13 +159,13 @@ curl -X POST http://127.0.0.1:8000/api/bookings/1/approve \
   -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "同意"}'
 ```
 
-### 5. 查询已锁定时段
+### 8. 查询已锁定时段
 
 ```bash
 curl "http://127.0.0.1:8000/api/bookings?status=approved&room_id=1"
 ```
 
-### 6. 居民取消自己的预约
+### 9. 居民取消自己的预约
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/bookings/1/cancel \
@@ -173,17 +173,55 @@ curl -X POST http://127.0.0.1:8000/api/bookings/1/cancel \
   -d '{"operator_id": "zhangsan", "operator_role": "resident", "reason": "临时有事"}'
 ```
 
-### 7. 查询审计日志
+### 10. 查询审计日志
 
 ```bash
 curl "http://127.0.0.1:8000/api/audit?booking_id=1"
 ```
 
-### 8. 导出审计日志
+### 11. 导出审计日志
 
 ```bash
 curl "http://127.0.0.1:8000/api/audit/export" -o audit_logs.json
 ```
+
+---
+
+## 配置参数
+
+周期预约的最大周数限制在 [booking/__init__.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/__init__.py) 中配置：
+
+```python
+MAX_RECURRING_WEEKS = 4  # 周期预约最多 4 周
+```
+
+---
+
+## 周期预约特性说明
+
+### 核心设计原则
+1. **不绕过现有校验**：每条子预约都会经过完整的开放时段检查、重叠检测、权限验证
+2. **不破坏单次预约**：现有单次预约逻辑完全独立，不受周期预约影响
+3. **结果透明可追溯**：每条预约的处理结果明确分类，审计日志完整记录
+
+### 结果分类
+| 状态 | 说明 |
+|------|------|
+| `success` | 预约创建成功，获得 `booking_id`，进入 `pending` 状态等待审批 |
+| `skipped` | 与已审批预约时段冲突，自动跳过，不创建预约记录 |
+| `denied` | 不在开放时段、房间未启用或其他权限问题被拒绝 |
+| `exceeded` | 超过配置的最大周数限制（请求阶段拦截） |
+
+### 审计链路
+- 批次创建时记录 `batch_create` 审计日志
+- 每条成功的子预约记录 `create` 审计日志并关联 `batch_id`
+- 后续审批、取消、过期操作的审计日志也会关联 `batch_id`
+- 可通过 `batch_id` 查询整个批次的完整操作历史
+
+### 权限控制
+- 居民只能查看和操作自己创建的批次
+- 管理员和工作人员可以查看所有批次
+- 子预约的审批、取消规则与单次预约完全一致
 
 ---
 
