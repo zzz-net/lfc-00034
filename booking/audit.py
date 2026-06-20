@@ -14,6 +14,7 @@ def _log_to_out(row) -> dict:
     return {
         "id": row["id"],
         "booking_id": row["booking_id"],
+        "batch_id": row["batch_id"],
         "action": row["action"],
         "old_status": row["old_status"],
         "new_status": row["new_status"],
@@ -27,6 +28,7 @@ def _log_to_out(row) -> dict:
 @router.get("", response_model=list[AuditLogOut])
 def query_audit(
     booking_id: int | None = None,
+    batch_id: int | None = None,
     action: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -38,6 +40,9 @@ def query_audit(
     if booking_id:
         conditions.append("booking_id = ?")
         params.append(booking_id)
+    if batch_id:
+        conditions.append("batch_id = ?")
+        params.append(batch_id)
     if action:
         conditions.append("action = ?")
         params.append(action)
@@ -62,6 +67,7 @@ def query_audit(
 @router.get("/export")
 def export_audit(
     booking_id: int | None = None,
+    batch_id: int | None = None,
     action: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -73,6 +79,9 @@ def export_audit(
     if booking_id:
         conditions.append("booking_id = ?")
         params.append(booking_id)
+    if batch_id:
+        conditions.append("batch_id = ?")
+        params.append(batch_id)
     if action:
         conditions.append("action = ?")
         params.append(action)

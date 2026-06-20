@@ -39,8 +39,11 @@ python test_sample.py
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/bookings` | 提交预约 |
-| GET | `/api/bookings` | 预约列表（按 status/room_id/user_id/date 过滤） |
+| POST | `/api/bookings/recurring` | 提交周期预约（按周重复） |
+| GET | `/api/bookings` | 预约列表（按 status/room_id/user_id/date/batch_id 过滤） |
 | GET | `/api/bookings/{id}` | 预约详情 |
+| GET | `/api/bookings/batches` | 批次列表（可按 user_id 过滤） |
+| GET | `/api/bookings/batches/{id}` | 批次详情（含关联预约） |
 | POST | `/api/bookings/{id}/approve` | 审批通过 |
 | POST | `/api/bookings/{id}/reject` | 审批驳回 |
 | POST | `/api/bookings/{id}/cancel` | 取消预约 |
@@ -72,10 +75,19 @@ pending ──approve──> approved ──cancel──> cancelled
 ```
 
 - **pending**：居民提交后等待审批
-- **approved**：管理员审批通过，房间锁定
-- **rejected**：管理员驳回
+- **approved**：管理员/工作人员审批通过，房间锁定
+- **rejected**：管理员/工作人员驳回
 - **cancelled**：居民取消自己的预约，或管理员取消
 - **expired**：系统自动将已过时间的 approved 预约标记过期
+
+### 审批权限规则
+
+| 操作 | 允许角色 |
+|------|----------|
+| approve（审批通过） | `admin`, `staff` |
+| reject（审批驳回） | `admin`, `staff` |
+| cancel（取消自己的预约） | `admin`, `staff`, `resident` |
+| cancel（取消他人的预约） | `admin`, `staff` |
 
 ---
 

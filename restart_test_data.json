@@ -1,0 +1,111 @@
+{
+  "batch_id": 5,
+  "batch_before": {
+    "id": 5,
+    "user_id": "sunba",
+    "total_count": 2,
+    "success_count": 2,
+    "skip_count": 0,
+    "denied_count": 0,
+    "exceeded_count": 0,
+    "created_at": "2026-06-21 01:27:03",
+    "bookings": [
+      {
+        "id": 17,
+        "room_id": 7,
+        "room_name": "书画室",
+        "user_id": "sunba",
+        "batch_id": 5,
+        "date": "2026-06-26",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "pending",
+        "purpose": "书法练习",
+        "created_at": "2026-06-21 01:27:03",
+        "updated_at": "2026-06-21 01:27:03"
+      },
+      {
+        "id": 18,
+        "room_id": 7,
+        "room_name": "书画室",
+        "user_id": "sunba",
+        "batch_id": 5,
+        "date": "2026-07-03",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "pending",
+        "purpose": "书法练习",
+        "created_at": "2026-06-21 01:27:03",
+        "updated_at": "2026-06-21 01:27:03"
+      }
+    ]
+  },
+  "bookings_before": [
+    {
+      "id": 18,
+      "room_id": 7,
+      "room_name": "书画室",
+      "user_id": "sunba",
+      "batch_id": 5,
+      "date": "2026-07-03",
+      "start_time": "10:00:00",
+      "end_time": "12:00:00",
+      "status": "pending",
+      "purpose": "书法练习",
+      "created_at": "2026-06-21 01:27:03",
+      "updated_at": "2026-06-21 01:27:03"
+    },
+    {
+      "id": 17,
+      "room_id": 7,
+      "room_name": "书画室",
+      "user_id": "sunba",
+      "batch_id": 5,
+      "date": "2026-06-26",
+      "start_time": "10:00:00",
+      "end_time": "12:00:00",
+      "status": "pending",
+      "purpose": "书法练习",
+      "created_at": "2026-06-21 01:27:03",
+      "updated_at": "2026-06-21 01:27:03"
+    }
+  ],
+  "logs_before": [
+    {
+      "id": 30,
+      "booking_id": 18,
+      "batch_id": 5,
+      "action": "create",
+      "old_status": null,
+      "new_status": "pending",
+      "operator_id": "sunba",
+      "operator_role": "resident",
+      "detail": "书法练习",
+      "created_at": "2026-06-21 01:27:03"
+    },
+    {
+      "id": 29,
+      "booking_id": 17,
+      "batch_id": 5,
+      "action": "create",
+      "old_status": null,
+      "new_status": "pending",
+      "operator_id": "sunba",
+      "operator_role": "resident",
+      "detail": "书法练习",
+      "created_at": "2026-06-21 01:27:03"
+    },
+    {
+      "id": 28,
+      "booking_id": null,
+      "batch_id": 5,
+      "action": "batch_create",
+      "old_status": null,
+      "new_status": null,
+      "operator_id": "sunba",
+      "operator_role": "resident",
+      "detail": "Recurring booking batch: 2 weeks starting 2026-06-26",
+      "created_at": "2026-06-21 01:27:03"
+    }
+  ]
+}

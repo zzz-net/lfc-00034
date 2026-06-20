@@ -1,7 +1,8 @@
-from datetime import date, time, datetime
+from datetime import date, time, datetime, timedelta
 
 from fastapi import APIRouter
 
+from booking import MAX_RECURRING_WEEKS
 from booking.database import get_db, get_db_readonly
 from booking.errors import BookingError, ErrorCode
 from booking.models import (
@@ -9,6 +10,11 @@ from booking.models import (
     BookingAction,
     BookingOut,
     BookingStatus,
+    RecurringBookingCreate,
+    RecurringBookingOut,
+    RecurringResultItem,
+    BatchOut,
+    BatchDetailOut,
     VALID_TRANSITIONS,
 )
 
@@ -23,6 +29,7 @@ def _booking_to_out(row) -> dict:
         "room_id": row["room_id"],
         "room_name": row["room_name"] if "room_name" in row.keys() else "",
         "user_id": row["user_id"],
+        "batch_id": row["batch_id"] if "batch_id" in row.keys() else None,
         "date": row["date"],
         "start_time": row["start_time"],
         "end_time": row["end_time"],
@@ -77,13 +84,44 @@ def _check_approval_permission(operator_role: str):
                            f"Only {sorted(APPROVAL_ROLES)} can approve or reject bookings")
 
 
-def _write_audit(conn, booking_id: int, action: str, old_status: str | None,
-                 new_status: str | None, operator_id: str, operator_role: str, detail: str):
+def _write_audit(conn, booking_id: int | None, action: str, old_status: str | None,
+                 new_status: str | None, operator_id: str, operator_role: str, detail: str,
+                 batch_id: int | None = None):
     conn.execute(
-        """INSERT INTO audit_logs (booking_id, action, old_status, new_status, operator_id, operator_role, detail)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (booking_id, action, old_status, new_status, operator_id, operator_role, detail),
+        """INSERT INTO audit_logs (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail),
     )
+
+
+def _create_single_booking(conn, room_id: int, user_id: str, booking_date: str,
+                           start_time: str, end_time: str, purpose: str,
+                           batch_id: int | None = None) -> dict:
+    room = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
+    if not room:
+        raise BookingError(ErrorCode.ROOM_NOT_FOUND)
+    if not room["is_active"]:
+        raise BookingError(ErrorCode.ROOM_INACTIVE)
+
+    _check_slot_open(conn, room_id, booking_date, start_time, end_time)
+    _check_overlap(conn, room_id, booking_date, start_time, end_time)
+
+    cur = conn.execute(
+        """INSERT INTO bookings (room_id, user_id, batch_id, date, start_time, end_time, purpose)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (room_id, user_id, batch_id, booking_date, start_time, end_time, purpose),
+    )
+    booking_id = cur.lastrowid
+
+    _write_audit(conn, booking_id, "create", None, "pending",
+                 user_id, "resident", purpose, batch_id=batch_id)
+
+    row = conn.execute(
+        """SELECT b.*, r.name as room_name FROM bookings b
+           JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
+        (booking_id,),
+    ).fetchone()
+    return _booking_to_out(row)
 
 
 @router.post("", response_model=BookingOut, status_code=201)
@@ -96,31 +134,110 @@ def create_booking(body: BookingCreate):
         raise BookingError(ErrorCode.INVALID_TIME_RANGE)
 
     with get_db() as conn:
-        room = conn.execute("SELECT * FROM rooms WHERE id = ?", (body.room_id,)).fetchone()
-        if not room:
-            raise BookingError(ErrorCode.ROOM_NOT_FOUND)
-        if not room["is_active"]:
-            raise BookingError(ErrorCode.ROOM_INACTIVE)
-
-        _check_slot_open(conn, body.room_id, date_str, start_str, end_str)
-        _check_overlap(conn, body.room_id, date_str, start_str, end_str)
-
-        cur = conn.execute(
-            """INSERT INTO bookings (room_id, user_id, date, start_time, end_time, purpose)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (body.room_id, body.user_id, date_str, start_str, end_str, body.purpose),
+        result = _create_single_booking(
+            conn, body.room_id, body.user_id, date_str, start_str, end_str, body.purpose
         )
-        booking_id = cur.lastrowid
+    return result
 
-        _write_audit(conn, booking_id, "create", None, "pending",
-                     body.user_id, "resident", body.purpose)
 
-        row = conn.execute(
-            """SELECT b.*, r.name as room_name FROM bookings b
-               JOIN rooms r ON b.room_id = r.id WHERE b.id = ?""",
-            (booking_id,),
+@router.post("/recurring", response_model=RecurringBookingOut, status_code=201)
+def create_recurring_booking(body: RecurringBookingCreate):
+    if body.start_time >= body.end_time:
+        raise BookingError(ErrorCode.INVALID_TIME_RANGE)
+
+    if body.weeks > MAX_RECURRING_WEEKS:
+        raise BookingError(
+            ErrorCode.BATCH_LIMIT_EXCEEDED,
+            f"Maximum {MAX_RECURRING_WEEKS} weeks allowed, requested {body.weeks}"
+        )
+
+    start_str = body.start_time.isoformat()
+    end_str = body.end_time.isoformat()
+
+    items: list[RecurringResultItem] = []
+    success_count = 0
+    skip_count = 0
+    denied_count = 0
+    exceeded_count = 0
+
+    with get_db() as conn:
+        cur = conn.execute(
+            """INSERT INTO booking_batches (user_id, total_count)
+               VALUES (?, ?)""",
+            (body.user_id, body.weeks),
+        )
+        batch_id = cur.lastrowid
+
+        _write_audit(
+            conn, None, "batch_create", None, None,
+            body.user_id, "resident",
+            f"Recurring booking batch: {body.weeks} weeks starting {body.start_date.isoformat()}",
+            batch_id=batch_id
+        )
+
+        for i in range(body.weeks):
+            current_date = body.start_date + timedelta(weeks=i)
+            date_str = current_date.isoformat()
+
+            try:
+                result = _create_single_booking(
+                    conn, body.room_id, body.user_id, date_str,
+                    start_str, end_str, body.purpose, batch_id=batch_id
+                )
+                items.append(RecurringResultItem(
+                    date=date_str,
+                    status="success",
+                    booking_id=result["id"]
+                ))
+                success_count += 1
+            except BookingError as e:
+                if e.code == ErrorCode.BOOKING_OVERLAP:
+                    items.append(RecurringResultItem(
+                        date=date_str,
+                        status="skipped",
+                        error_code=e.code,
+                        message=e.message
+                    ))
+                    skip_count += 1
+                elif e.code in (ErrorCode.SLOT_NOT_OPEN, ErrorCode.ROOM_INACTIVE):
+                    items.append(RecurringResultItem(
+                        date=date_str,
+                        status="denied",
+                        error_code=e.code,
+                        message=e.message
+                    ))
+                    denied_count += 1
+                else:
+                    items.append(RecurringResultItem(
+                        date=date_str,
+                        status="denied",
+                        error_code=e.code,
+                        message=e.message
+                    ))
+                    denied_count += 1
+
+        conn.execute(
+            """UPDATE booking_batches
+               SET success_count = ?, skip_count = ?, denied_count = ?, exceeded_count = ?
+               WHERE id = ?""",
+            (success_count, skip_count, denied_count, exceeded_count, batch_id)
+        )
+
+        batch_row = conn.execute(
+            "SELECT * FROM booking_batches WHERE id = ?", (batch_id,)
         ).fetchone()
-    return _booking_to_out(row)
+
+    return RecurringBookingOut(
+        batch_id=batch_id,
+        user_id=body.user_id,
+        total=body.weeks,
+        success=success_count,
+        skipped=skip_count,
+        denied=denied_count,
+        exceeded=exceeded_count,
+        items=items,
+        created_at=batch_row["created_at"]
+    )
 
 
 @router.get("", response_model=list[BookingOut])
@@ -129,6 +246,7 @@ def list_bookings(
     room_id: int | None = None,
     user_id: str | None = None,
     date: date | None = None,
+    batch_id: int | None = None,
 ):
     conn = get_db_readonly()
     conditions = []
@@ -145,6 +263,9 @@ def list_bookings(
     if date:
         conditions.append("b.date = ?")
         params.append(date.isoformat())
+    if batch_id:
+        conditions.append("b.batch_id = ?")
+        params.append(batch_id)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     rows = conn.execute(
@@ -154,6 +275,66 @@ def list_bookings(
         params,
     ).fetchall()
     return [_booking_to_out(r) for r in rows]
+
+
+def _batch_to_out(row) -> dict:
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "total_count": row["total_count"],
+        "success_count": row["success_count"],
+        "skip_count": row["skip_count"],
+        "denied_count": row["denied_count"],
+        "exceeded_count": row["exceeded_count"],
+        "created_at": row["created_at"],
+    }
+
+
+@router.get("/batches", response_model=list[BatchOut])
+def list_batches(
+    user_id: str | None = None,
+):
+    conn = get_db_readonly()
+    conditions = []
+    params = []
+    if user_id:
+        conditions.append("user_id = ?")
+        params.append(user_id)
+
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = conn.execute(
+        f"SELECT * FROM booking_batches {where} ORDER BY id DESC",
+        params,
+    ).fetchall()
+    return [_batch_to_out(r) for r in rows]
+
+
+@router.get("/batches/{batch_id}", response_model=BatchDetailOut)
+def get_batch(batch_id: int, operator_id: str | None = None, operator_role: str = "resident"):
+    conn = get_db_readonly()
+    row = conn.execute(
+        "SELECT * FROM booking_batches WHERE id = ?", (batch_id,)
+    ).fetchone()
+    if not row:
+        raise BookingError(ErrorCode.BATCH_NOT_FOUND)
+
+    if operator_role == "resident" and row["user_id"] != operator_id:
+        raise BookingError(
+            ErrorCode.PERMISSION_DENIED,
+            "Residents can only view their own batches"
+        )
+
+    bookings = conn.execute(
+        """SELECT b.*, r.name as room_name FROM bookings b
+           JOIN rooms r ON b.room_id = r.id
+           WHERE b.batch_id = ?
+           ORDER BY b.date, b.start_time""",
+        (batch_id,),
+    ).fetchall()
+
+    result = _batch_to_out(row)
+    result["bookings"] = [_booking_to_out(b) for b in bookings]
+    return result
 
 
 @router.get("/{booking_id}", response_model=BookingOut)

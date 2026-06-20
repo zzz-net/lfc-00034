@@ -68,6 +68,16 @@ class BookingCreate(BaseModel):
     purpose: str = Field(default="", max_length=500)
 
 
+class RecurringBookingCreate(BaseModel):
+    room_id: int
+    user_id: str = Field(..., min_length=1, max_length=50)
+    start_date: date
+    start_time: time
+    end_time: time
+    purpose: str = Field(default="", max_length=500)
+    weeks: int = Field(..., ge=1, le=52)
+
+
 class BookingAction(BaseModel):
     operator_id: str = Field(..., min_length=1, max_length=50)
     operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
@@ -79,6 +89,7 @@ class BookingOut(BaseModel):
     room_id: int
     room_name: str
     user_id: str
+    batch_id: Optional[int]
     date: str
     start_time: str
     end_time: str
@@ -90,7 +101,8 @@ class BookingOut(BaseModel):
 
 class AuditLogOut(BaseModel):
     id: int
-    booking_id: int
+    booking_id: Optional[int]
+    batch_id: Optional[int]
     action: str
     old_status: Optional[str]
     new_status: Optional[str]
@@ -98,6 +110,41 @@ class AuditLogOut(BaseModel):
     operator_role: str
     detail: str
     created_at: str
+
+
+class RecurringResultItem(BaseModel):
+    date: str
+    status: str
+    booking_id: Optional[int] = None
+    error_code: Optional[int] = None
+    message: Optional[str] = None
+
+
+class RecurringBookingOut(BaseModel):
+    batch_id: int
+    user_id: str
+    total: int
+    success: int
+    skipped: int
+    denied: int
+    exceeded: int
+    items: list[RecurringResultItem]
+    created_at: str
+
+
+class BatchOut(BaseModel):
+    id: int
+    user_id: str
+    total_count: int
+    success_count: int
+    skip_count: int
+    denied_count: int
+    exceeded_count: int
+    created_at: str
+
+
+class BatchDetailOut(BatchOut):
+    bookings: list[BookingOut]
 
 
 class ErrorResponse(BaseModel):

@@ -59,6 +59,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             room_id INTEGER NOT NULL,
             user_id TEXT NOT NULL,
+            batch_id INTEGER,
             date TEXT NOT NULL,
             start_time TEXT NOT NULL,
             end_time TEXT NOT NULL,
@@ -67,12 +68,25 @@ def init_db():
             purpose TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            FOREIGN KEY (room_id) REFERENCES rooms(id)
+            FOREIGN KEY (room_id) REFERENCES rooms(id),
+            FOREIGN KEY (batch_id) REFERENCES booking_batches(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS booking_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            total_count INTEGER NOT NULL,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            skip_count INTEGER NOT NULL DEFAULT 0,
+            denied_count INTEGER NOT NULL DEFAULT 0,
+            exceeded_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         );
 
         CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            booking_id INTEGER NOT NULL,
+            booking_id INTEGER,
+            batch_id INTEGER,
             action TEXT NOT NULL,
             old_status TEXT,
             new_status TEXT,
@@ -80,7 +94,8 @@ def init_db():
             operator_role TEXT NOT NULL DEFAULT 'admin',
             detail TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-            FOREIGN KEY (booking_id) REFERENCES bookings(id)
+            FOREIGN KEY (booking_id) REFERENCES bookings(id),
+            FOREIGN KEY (batch_id) REFERENCES booking_batches(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_bookings_room_date
@@ -92,13 +107,31 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_bookings_user
             ON bookings(user_id);
 
+        CREATE INDEX IF NOT EXISTS idx_bookings_batch
+            ON bookings(batch_id);
+
         CREATE INDEX IF NOT EXISTS idx_audit_booking
             ON audit_logs(booking_id);
+
+        CREATE INDEX IF NOT EXISTS idx_audit_batch
+            ON audit_logs(batch_id);
 
         CREATE INDEX IF NOT EXISTS idx_audit_created
             ON audit_logs(created_at);
     """)
     conn.commit()
+
+    try:
+        conn.execute("ALTER TABLE bookings ADD COLUMN batch_id INTEGER REFERENCES booking_batches(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN batch_id INTEGER REFERENCES booking_batches(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def close_db():
