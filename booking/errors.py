@@ -57,7 +57,8 @@ ERROR_MESSAGES = {
 
 
 class BookingError(Exception):
-    def __init__(self, code: ErrorCode, detail: str | None = None):
+    def __init__(self, code: ErrorCode, detail: str | None = None, extra: dict | None = None):
         self.code = code
         self.message = detail or ERROR_MESSAGES.get(code, "Unknown error")
+        self.extra = extra
         super().__init__(self.message)

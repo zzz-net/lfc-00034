@@ -11,10 +11,16 @@ router = APIRouter(prefix="/api/audit", tags=["audit"])
 
 
 def _log_to_out(row) -> dict:
+    def _g(key, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
     return {
         "id": row["id"],
         "booking_id": row["booking_id"],
         "batch_id": row["batch_id"],
+        "snapshot_id": _g("snapshot_id"),
         "action": row["action"],
         "old_status": row["old_status"],
         "new_status": row["new_status"],

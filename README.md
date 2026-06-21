@@ -242,6 +242,14 @@ pending ──approve──> approved ──cancel──> cancelled
 | 10014 | BATCH_NOTHING_TO_OPERATE | 批次中无符合条件的可操作预约（全部已生效、已审批、已结束） |
 | 10015 | NEW_SLOT_NOT_OPEN | 改期目标时间不在任何开放时段内 |
 | 10016 | NEW_BOOKING_OVERLAP | 改期目标时间与已审批预约冲突 |
+| 10017 | SNAPSHOT_NOT_FOUND | 快照不存在 |
+| 10018 | SNAPSHOT_INVALID_STATUS | 快照状态不允许此操作（rolled_back/cancelled 后执行，非 pending 取消） |
+| 10019 | SNAPSHOT_ALREADY_EXECUTED | 快照已执行过（executed 重复调用 /execute） |
+| 10020 | SNAPSHOT_NOT_EXECUTED | 快照尚未执行（pending 调用 /rollback） |
+| 10021 | SNAPSHOT_ALREADY_ROLLED_BACK | 快照已回退过（rolled_back 重复调用 /rollback） |
+| 10022 | SNAPSHOT_CONFLICT | 快照占用冲突（同批 booking 被其他 pending/executed 快照占用） |
+| 10023 | SNAPSHOT_BOOKING_CHANGED | 预约已变化 / 回退目标状态不一致（执行前 4 字段对比 / 回退 Expected vs Actual） |
+| 10024 | SNAPSHOT_OPERATION_NOT_ALLOWED | 无执行/回退/取消权限（resident 调用 /execute /rollback /cancel） |
 
 所有业务错误返回 HTTP 422，响应体为：
 

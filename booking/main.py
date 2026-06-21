@@ -32,12 +32,15 @@ app.include_router(snapshots_router)
 
 @app.exception_handler(BookingError)
 async def booking_error_handler(request: Request, exc: BookingError):
+    content = {
+        "error_code": exc.code,
+        "message": exc.message,
+    }
+    if exc.extra:
+        content.update(exc.extra)
     return JSONResponse(
         status_code=422,
-        content={
-            "error_code": exc.code,
-            "message": exc.message,
-        },
+        content=content,
     )
 
 

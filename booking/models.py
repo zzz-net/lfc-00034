@@ -116,6 +116,7 @@ class AuditLogOut(BaseModel):
     id: int
     booking_id: Optional[int]
     batch_id: Optional[int]
+    snapshot_id: Optional[int]
     action: str
     old_status: Optional[str]
     new_status: Optional[str]
@@ -236,12 +237,19 @@ class SnapshotConfigOut(BaseModel):
     snapshot_created_at: str
 
 
+class SnapshotConflictFieldDiff(BaseModel):
+    field: str
+    expected_value: str | None
+    actual_value: str | None
+
+
 class SnapshotConflictItem(BaseModel):
     booking_id: int
     conflict_type: str
     message: str
     current_snapshot_id: int | None = None
     current_status: str | None = None
+    field_diffs: list[SnapshotConflictFieldDiff] = []
 
 
 class SnapshotConflictCheck(BaseModel):

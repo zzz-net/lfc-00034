@@ -61,19 +61,25 @@ def _classify_week_phase(booking_row) -> BookingWeekPhase:
 
 def _write_audit(conn, booking_id: int | None, action: str, old_status: str | None,
                  new_status: str | None, operator_id: str, operator_role: str, detail: str,
-                 batch_id: int | None = None):
+                 batch_id: int | None = None, snapshot_id: int | None = None):
     conn.execute(
-        """INSERT INTO audit_logs (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail),
+        """INSERT INTO audit_logs (booking_id, batch_id, snapshot_id, action, old_status, new_status, operator_id, operator_role, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (booking_id, batch_id, snapshot_id, action, old_status, new_status, operator_id, operator_role, detail),
     )
 
 
 def _audit_log_to_out(row) -> dict:
+    def _g(key, default=None):
+        try:
+            return row[key]
+        except (KeyError, IndexError):
+            return default
     return {
         "id": row["id"],
         "booking_id": row["booking_id"],
         "batch_id": row["batch_id"],
+        "snapshot_id": _g("snapshot_id"),
         "action": row["action"],
         "old_status": row["old_status"],
         "new_status": row["new_status"],
@@ -118,9 +124,9 @@ def _snapshot_row_to_out(conn, row) -> dict:
 
     audit_rows = conn.execute(
         """SELECT * FROM audit_logs
-           WHERE detail LIKE ? OR detail LIKE ?
+           WHERE snapshot_id = ?
            ORDER BY id""",
-        (f"%snapshot #{row['id']}%", f"%Snapshot #{row['id']}%")
+        (row["id"],)
     ).fetchall()
 
     return {
@@ -225,6 +231,8 @@ def _check_conflicts(conn, batch_id: int, booking_ids: list[int], current_snapsh
 
 
 def _verify_booking_unchanged(conn, snapshot_booking_rows) -> tuple[bool, list[SnapshotConflictItem]]:
+    from booking.models import SnapshotConflictFieldDiff
+
     conflicts: list[SnapshotConflictItem] = []
 
     for sb in snapshot_booking_rows:
@@ -236,21 +244,34 @@ def _verify_booking_unchanged(conn, snapshot_booking_rows) -> tuple[bool, list[S
             conflicts.append(SnapshotConflictItem(
                 booking_id=sb["booking_id"],
                 conflict_type="booking_deleted",
-                message=f"Booking #{sb['booking_id']} has been deleted since snapshot was created"
+                message=f"Booking #{sb['booking_id']} has been deleted since snapshot was created. Expected booking to exist with status={sb['status']}, date={sb['date']}",
             ))
             continue
 
-        changed_fields = []
+        field_diffs: list[SnapshotConflictFieldDiff] = []
+        changed_desc = []
         for field in ["date", "start_time", "end_time", "status"]:
-            if current[field] != sb[field]:
-                changed_fields.append(f"{field}: {sb[field]} -> {current[field]}")
+            expected = str(sb[field])
+            actual = str(current[field])
+            if actual != expected:
+                field_diffs.append(SnapshotConflictFieldDiff(
+                    field=field,
+                    expected_value=expected,
+                    actual_value=actual,
+                ))
+                changed_desc.append(f"{field}: expected={expected}, actual={actual}")
 
-        if changed_fields:
+        if field_diffs:
             conflicts.append(SnapshotConflictItem(
                 booking_id=sb["booking_id"],
                 conflict_type="booking_changed",
-                message=f"Booking #{sb['booking_id']} has changed: {', '.join(changed_fields)}",
-                current_status=current["status"]
+                message=(
+                    f"Booking #{sb['booking_id']} has been modified externally since snapshot was created. "
+                    f"Cannot proceed without risk of overwriting. Conflicting fields: {'; '.join(changed_desc)}. "
+                    f"Either revert the external changes first, or create a fresh snapshot."
+                ),
+                current_status=current["status"],
+                field_diffs=field_diffs,
             ))
 
     return len(conflicts) == 0, conflicts
@@ -281,7 +302,13 @@ def create_snapshot(body: SnapshotCreate) -> SnapshotOut:
             conflict_details = "; ".join([f"#{c.booking_id}: {c.message}" for c in conflict_check.conflicts])
             raise BookingError(
                 ErrorCode.SNAPSHOT_CONFLICT,
-                f"Cannot create snapshot: {conflict_details}"
+                f"Cannot create snapshot: {conflict_details}",
+                extra={
+                    "conflict_check": {
+                        "has_conflict": True,
+                        "conflicts": [c.model_dump() for c in conflict_check.conflicts],
+                    },
+                },
             )
 
         preserved_count = 0
@@ -349,7 +376,8 @@ def create_snapshot(body: SnapshotCreate) -> SnapshotOut:
             f"Created snapshot #{snapshot_id} for batch #{body.batch_id}, "
             f"operation={body.operation_type.value}, affected={affected_count}, "
             f"preserved={preserved_count}. Description: {body.description}",
-            batch_id=body.batch_id
+            batch_id=body.batch_id,
+            snapshot_id=snapshot_id
         )
 
         snapshot_row = conn.execute(
@@ -485,7 +513,13 @@ def execute_snapshot(snapshot_id: int, body: SnapshotExecute) -> SnapshotOut:
             conflict_details = "; ".join([f"#{c.booking_id}: {c.message}" for c in conflicts])
             raise BookingError(
                 ErrorCode.SNAPSHOT_BOOKING_CHANGED,
-                f"Cannot execute snapshot: {conflict_details}"
+                f"Cannot execute snapshot: {conflict_details}",
+                extra={
+                    "conflict_check": {
+                        "has_conflict": True,
+                        "conflicts": [c.model_dump() for c in conflicts],
+                    },
+                },
             )
 
         booking_ids = [sb["booking_id"] for sb in snapshot_bookings]
@@ -494,7 +528,13 @@ def execute_snapshot(snapshot_id: int, body: SnapshotExecute) -> SnapshotOut:
             conflict_details = "; ".join([f"#{c.booking_id}: {c.message}" for c in conflict_check.conflicts])
             raise BookingError(
                 ErrorCode.SNAPSHOT_CONFLICT,
-                f"Cannot execute snapshot: {conflict_details}"
+                f"Cannot execute snapshot: {conflict_details}",
+                extra={
+                    "conflict_check": {
+                        "has_conflict": True,
+                        "conflicts": [c.model_dump() for c in conflict_check.conflicts],
+                    },
+                },
             )
 
         operation_type = row["operation_type"]
@@ -505,7 +545,8 @@ def execute_snapshot(snapshot_id: int, body: SnapshotExecute) -> SnapshotOut:
             body.operator_id, body.operator_role,
             f"Starting execution of snapshot #{snapshot_id}, operation={operation_type}, "
             f"reason={body.reason}",
-            batch_id=row["batch_id"]
+            batch_id=row["batch_id"],
+            snapshot_id=snapshot_id
         )
 
         operation_result: SnapshotOperationResult | None = None
@@ -531,7 +572,8 @@ def execute_snapshot(snapshot_id: int, body: SnapshotExecute) -> SnapshotOut:
             f"Finished execution of snapshot #{snapshot_id}: "
             f"success={operation_result.success}, preserved={operation_result.preserved}, "
             f"skipped={operation_result.skipped}, denied={operation_result.denied}",
-            batch_id=row["batch_id"]
+            batch_id=row["batch_id"],
+            snapshot_id=snapshot_id
         )
 
         snapshot_row = conn.execute(
@@ -677,7 +719,8 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
                 f"-> {new_date} {new_start_time_str}-{new_end_time_str}. "
                 f"Reason: {body.reason}. "
                 f"max_recurring_weeks_at_operation={MAX_RECURRING_WEEKS}",
-                batch_id=batch_id
+                batch_id=batch_id,
+                snapshot_id=snapshot_id
             )
 
             items.append(SnapshotOperationResultItem(
@@ -781,7 +824,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                     body.operator_id, body.operator_role,
                     f"Snapshot #{snapshot_id} admin/staff batch cancel approved booking. "
                     f"Reason: {body.reason}",
-                    batch_id=batch_id
+                    batch_id=batch_id,
+                    snapshot_id=snapshot_id
                 )
                 items.append(SnapshotOperationResultItem(
                     booking_id=booking_id,
@@ -832,11 +876,12 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                 (booking_id,),
             )
             _write_audit(
-                conn, booking_id, "cancel", old_status, "cancelled",
-                body.operator_id, body.operator_role,
-                f"Snapshot #{snapshot_id} batch cancel. Reason: {body.reason}",
-                batch_id=batch_id
-            )
+                    conn, booking_id, "cancel", old_status, "cancelled",
+                    body.operator_id, body.operator_role,
+                    f"Snapshot #{snapshot_id} batch cancel. Reason: {body.reason}",
+                    batch_id=batch_id,
+                    snapshot_id=snapshot_id
+                )
             items.append(SnapshotOperationResultItem(
                 booking_id=booking_id,
                 old_date=old_date,
@@ -904,7 +949,8 @@ def _execute_export(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
         body.operator_id, body.operator_role,
         f"Snapshot #{snapshot_id} export executed for batch #{batch_id}. "
         f"Reason: {body.reason}",
-        batch_id=batch_id
+        batch_id=batch_id,
+        snapshot_id=snapshot_id
     )
 
     executed_at = conn.execute("SELECT datetime('now','localtime') as ts").fetchone()["ts"]
@@ -968,7 +1014,8 @@ def rollback_snapshot(snapshot_id: int, body: SnapshotRollback) -> SnapshotOut:
             body.operator_id, body.operator_role,
             f"Starting rollback of snapshot #{snapshot_id}, "
             f"operation={row['operation_type']}, reason={body.reason}",
-            batch_id=row["batch_id"]
+            batch_id=row["batch_id"],
+            snapshot_id=snapshot_id
         )
 
         rollback_result = _execute_rollback(conn, row, snapshot_bookings, body)
@@ -987,7 +1034,8 @@ def rollback_snapshot(snapshot_id: int, body: SnapshotRollback) -> SnapshotOut:
             f"Finished rollback of snapshot #{snapshot_id}: "
             f"success={rollback_result.success}, preserved={rollback_result.preserved}, "
             f"skipped={rollback_result.skipped}, denied={rollback_result.denied}",
-            batch_id=row["batch_id"]
+            batch_id=row["batch_id"],
+            snapshot_id=snapshot_id
         )
 
         snapshot_row = conn.execute(
@@ -1089,21 +1137,37 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                 skipped_count += 1
                 continue
 
-            if expected_new_date and expected_new_start_time and expected_new_end_time:
+            # reschedule 冲突检测：只要传了 new_start_date 就进行（即使时间没改，也要检查 date 是否正确 + status 是否被外部改动）
+            if expected_new_date:
                 current_dt = str(current["date"])
                 current_st = str(current["start_time"])
                 current_et = str(current["end_time"])
+                current_status = str(current["status"])
                 exp_dt = str(expected_new_date)
-                exp_st = str(expected_new_start_time)
-                exp_et = str(expected_new_end_time)
+                # 如果没传新时间，就用快照基线的时间作为期望值（因为没改时间）
+                exp_st = str(expected_new_start_time) if expected_new_start_time else str(old_start_time)
+                exp_et = str(expected_new_end_time) if expected_new_end_time else str(old_end_time)
+                exp_status = str(old_status)
 
-                current_matches_expected = (
+                date_time_match = (
                     current_dt == exp_dt and
                     current_st.startswith(exp_st) and
                     current_et.startswith(exp_et)
                 )
+                status_match = current_status == exp_status
+                current_matches_expected = date_time_match and status_match
 
                 if not current_matches_expected:
+                    mismatch_parts = []
+                    if not date_time_match:
+                        mismatch_parts.append(
+                            f"Expected: date={exp_dt}, time={exp_st}-{exp_et}. "
+                            f"Actual: date={current_dt}, time={current_st}-{current_et}."
+                        )
+                    if not status_match:
+                        mismatch_parts.append(
+                            f"Expected: status={exp_status}. Actual: status={current_status}."
+                        )
                     items.append(SnapshotOperationResultItem(
                         booking_id=booking_id,
                         old_date=current["date"],
@@ -1114,8 +1178,7 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                         error_code=ErrorCode.SNAPSHOT_BOOKING_CHANGED,
                         message=(
                             f"Cannot rollback: booking state does not match expected state after snapshot execution. "
-                            f"Expected: date={exp_dt}, time={exp_st}-{exp_et}. "
-                            f"Actual: date={current_dt}, time={current_st}-{current_et}. "
+                            f"{' '.join(mismatch_parts)} "
                             f"The booking may have been modified after the snapshot was executed."
                         ),
                         week_phase_before=phase.value,
@@ -1196,7 +1259,8 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                     f"{current['date']} {current['start_time']}-{current['end_time']} "
                     f"-> {old_date} {old_start_time}-{old_end_time}. "
                     f"Reason: {body.reason}",
-                    batch_id=batch_id
+                    batch_id=batch_id,
+                    snapshot_id=snapshot_id
                 )
 
                 items.append(SnapshotOperationResultItem(
@@ -1288,7 +1352,8 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                     body.operator_id, body.operator_role,
                     f"Snapshot #{snapshot_id} rollback cancel: "
                     f"{current['status']} -> {old_status}. Reason: {body.reason}",
-                    batch_id=batch_id
+                    batch_id=batch_id,
+                    snapshot_id=snapshot_id
                 )
 
                 items.append(SnapshotOperationResultItem(
@@ -1353,9 +1418,9 @@ def export_snapshot(snapshot_id: int, operator_id: str | None = None, operator_r
 
     audit_rows = conn.execute(
         """SELECT * FROM audit_logs
-           WHERE detail LIKE ? OR detail LIKE ?
+           WHERE snapshot_id = ?
            ORDER BY id""",
-        (f"%snapshot #{snapshot_id}%", f"%Snapshot #{snapshot_id}%")
+        (snapshot_id,)
     ).fetchall()
 
     batch_audit_rows = conn.execute(
@@ -1439,7 +1504,8 @@ def cancel_snapshot(snapshot_id: int, operator_id: str, operator_role: str, reas
             operator_id, operator_role,
             f"Cancelled snapshot #{snapshot_id} for batch #{row['batch_id']}. "
             f"Reason: {reason}",
-            batch_id=row["batch_id"]
+            batch_id=row["batch_id"],
+            snapshot_id=snapshot_id
         )
 
         snapshot_row = conn.execute(

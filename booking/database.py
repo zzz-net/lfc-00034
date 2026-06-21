@@ -1,9 +1,11 @@
+import os
 import sqlite3
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "booking.db"
+_DB_PATH_ENV = os.environ.get("BOOKING_DB_PATH")
+DB_PATH = Path(_DB_PATH_ENV) if _DB_PATH_ENV else (Path(__file__).parent.parent / "booking.db")
 
 _local = threading.local()
 
@@ -88,6 +90,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             booking_id INTEGER,
             batch_id INTEGER,
+            snapshot_id INTEGER,
             action TEXT NOT NULL,
             old_status TEXT,
             new_status TEXT,
@@ -96,7 +99,8 @@ def init_db():
             detail TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             FOREIGN KEY (booking_id) REFERENCES bookings(id),
-            FOREIGN KEY (batch_id) REFERENCES booking_batches(id)
+            FOREIGN KEY (batch_id) REFERENCES booking_batches(id),
+            FOREIGN KEY (snapshot_id) REFERENCES batch_snapshots(id)
         );
 
         CREATE INDEX IF NOT EXISTS idx_bookings_room_date
@@ -119,6 +123,9 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_audit_created
             ON audit_logs(created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_audit_snapshot
+            ON audit_logs(snapshot_id);
 
         CREATE TABLE IF NOT EXISTS batch_snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +214,12 @@ def init_db():
 
     try:
         conn.execute("ALTER TABLE bookings ADD COLUMN rescheduled_from_booking_id INTEGER REFERENCES bookings(id)")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN snapshot_id INTEGER REFERENCES batch_snapshots(id)")
         conn.commit()
     except sqlite3.OperationalError:
         pass

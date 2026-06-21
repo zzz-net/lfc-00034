@@ -130,11 +130,11 @@ def _check_approval_permission(operator_role: str):
 
 def _write_audit(conn, booking_id: int | None, action: str, old_status: str | None,
                  new_status: str | None, operator_id: str, operator_role: str, detail: str,
-                 batch_id: int | None = None):
+                 batch_id: int | None = None, snapshot_id: int | None = None):
     conn.execute(
-        """INSERT INTO audit_logs (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (booking_id, batch_id, action, old_status, new_status, operator_id, operator_role, detail),
+        """INSERT INTO audit_logs (booking_id, batch_id, snapshot_id, action, old_status, new_status, operator_id, operator_role, detail)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (booking_id, batch_id, snapshot_id, action, old_status, new_status, operator_id, operator_role, detail),
     )
 
 
