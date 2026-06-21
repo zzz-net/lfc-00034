@@ -607,15 +607,6 @@ def reschedule_batch(batch_id: int, body: BatchRescheduleCreate):
                 "No adjustable bookings in this batch (all in effect, approved, or finished)"
             )
 
-        adjustable_count = len(adjustable_items)
-        if adjustable_count > MAX_RECURRING_WEEKS:
-            raise BookingError(
-                ErrorCode.BATCH_LIMIT_EXCEEDED,
-                f"Rescheduling {adjustable_count} weeks exceeds current limit "
-                f"{MAX_RECURRING_WEEKS} set by {ENV_VAR_NAME}. "
-                f"Consider canceling some items or split into smaller operations."
-            )
-
         new_start_time_str = (
             body.new_start_time.isoformat()
             if body.new_start_time is not None

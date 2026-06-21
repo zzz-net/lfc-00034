@@ -1183,8 +1183,33 @@ def run_after_restart():
 BASE2 = "http://127.0.0.1:8001"
 _PASS2 = 0
 _FAIL2 = 0
+BASE3 = "http://127.0.0.1:8002"
+_PASS3 = 0
+_FAIL3 = 0
 from datetime import date, timedelta as _td
 timedelta = _td
+
+
+def api3(method: str, path: str, data: dict | None = None, expect_status: int = 200, params: dict | None = None) -> dict:
+    url = f"{BASE3}{path}"
+    if method == "get" and data is not None and params is None:
+        params = data
+        data = None
+    resp = getattr(requests, method)(url, json=data, params=params)
+    ok = resp.status_code == expect_status
+    global _PASS3, _FAIL3
+    if ok:
+        _PASS3 += 1
+    else:
+        _FAIL3 += 1
+    tag = "[PASS]" if ok else "[FAIL]"
+    print(f"  {tag} {method.upper()} {path} => {resp.status_code} (expect {expect_status})")
+    if not ok:
+        print(f"    response: {resp.text[:300]}")
+    try:
+        return resp.json()
+    except json.JSONDecodeError:
+        return {}
 
 
 def api2(method: str, path: str, data: dict | None = None, expect_status: int = 200, params: dict | None = None) -> dict:
@@ -1839,6 +1864,191 @@ def test_cancel_export_query_consistency(batch_id_cancel):
 
 
 # ============================================================
+# 测试9: 跨重启配置收紧 - MAX从4降到2, 改期不被整单拦截
+# ============================================================
+def test_batch_reschedule_config_tightening():
+    global _PASS2, _FAIL2, _PASS3, _FAIL3
+    print("\n========== 新功能: 跨重启配置收紧 - MAX=4→2, 改期逐周处理不整单拦截 ==========")
+
+    print(f"\n  --- 阶段1: 在 {BASE2} (MAX=4) 创建 4 周批次, 审批1条 ---")
+    r = api2("post", "/api/rooms", {"name": "配置收紧_多功能厅", "description": "MAX=4创建MAX=2改期"}, 201)
+    room_id = r["id"]
+
+    next_mon_4weeks = _next_weekday(0, 28)
+    api2("post", f"/api/rooms/{room_id}/timeslots", {
+        "slots": [{"weekday": 0, "start_time": "09:00", "end_time": "12:00"}]
+    }, 201)
+
+    cfg = api2("get", "/api/bookings/recurring/config")
+    max_at_creation = cfg["max_recurring_weeks"]
+    print(f"  创建时配置 max_recurring_weeks={max_at_creation}")
+    assert max_at_creation >= 4, f"创建服务MAX应>=4, 实际={max_at_creation}"
+
+    r = api2("post", "/api/bookings/recurring", {
+        "room_id": room_id,
+        "start_date": next_mon_4weeks.isoformat(),
+        "weekday": 0, "start_time": "09:00", "end_time": "12:00",
+        "weeks": 4,
+        "user_id": "user_tight", "user_name": "收紧配置测试用户",
+        "purpose": "测试MAX收紧后改期不被整单拦截"
+    }, 201)
+    batch_id = r["batch_id"]
+
+    # 查询详情获取 booking_ids（更可靠，不依赖创建时返回结构）
+    r_detail = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_tight&operator_role=admin")
+    booking_ids = [b["id"] for b in r_detail["bookings"]]
+    print(f"  创建4周批次#{batch_id}, booking_ids={booking_ids}")
+    assert len(booking_ids) == 4, f"应创建4条预约, 实际={len(booking_ids)}"
+
+    approved_id = booking_ids[0]
+    api2("post", f"/api/bookings/{approved_id}/approve", {
+        "operator_id": "admin_tight", "operator_role": "admin", "note": "test"
+    }, 200)
+    print(f"  审批 #{approved_id} 为 approved (preserved_approved 相位, 改期时会 preserved)")
+
+    detail_at_creation = api2("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_tight&operator_role=admin")
+    phases_at_creation = {b["id"]: b["week_phase"] for b in detail_at_creation["bookings"]}
+    print(f"  创建后相位: {phases_at_creation}")
+    assert phases_at_creation[approved_id] == "preserved_approved"
+    adjustable_ids = [bid for bid, ph in phases_at_creation.items() if ph == "adjustable"]
+    print(f"  adjustable={len(adjustable_ids)}条 (应该=3), ids={adjustable_ids}")
+    assert len(adjustable_ids) == 3, f"应有3条可调, 实际={len(adjustable_ids)}"
+
+    print(f"\n  --- 阶段2: 切换到 {BASE3} (MAX=2) 模拟重启后配置收紧 ---")
+    cfg_new = api3("get", "/api/bookings/recurring/config")
+    max_at_operation = cfg_new["max_recurring_weeks"]
+    print(f"  操作时配置 max_recurring_weeks={max_at_operation}")
+    assert max_at_operation == 2, f"操作服务MAX应=2, 实际={max_at_operation}"
+
+    new_start = next_mon_4weeks + timedelta(days=28)
+    print(f"  改期目标起始日期: {new_start} (周一)")
+
+    r = api3("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": new_start.isoformat(),
+        "operator_id": "admin_tight", "operator_role": "admin",
+        "reason": "配置收紧测试 - 管理员继续处理未开始周次"
+    }, 200)
+
+    print(f"  >> 改期结果: total={r['total']}, success={r['success']}, preserved={r['preserved']}, denied={r['denied']}, skipped={r['skipped']}")
+    for it in r["items"]:
+        msg = str(it.get('message') or "")[:40]
+        print(f"     #{it['booking_id']}: {it['result']:10s} phase_before={it['week_phase_before']:20s} old={it['old_date']} new={it['new_date']} msg={msg}")
+
+    assert r["total"] == 4, f"total应=4, 实际={r['total']}"
+    assert r["preserved"] == 1, f"preserved应=1(已审批的那条), 实际={r['preserved']}"
+    assert r["success"] == 3, f"success应=3(3条可调都应成功), 实际={r['success']}"
+    assert r["denied"] == 0, f"denied应=0, 实际={r['denied']}"
+    assert r["skipped"] == 0, f"skipped应=0, 实际={r['skipped']}"
+
+    assert r["max_recurring_weeks_at_creation"] == max_at_creation, "creation值应与创建时一致"
+    assert r["max_recurring_weeks_at_operation"] == max_at_operation, "operation值应与操作时一致"
+    print(f"  [PASS] 配置双轨正确: creation={r['max_recurring_weeks_at_creation']}, operation={r['max_recurring_weeks_at_operation']}")
+
+    preserved_items = [it for it in r["items"] if it["result"] == "preserved"]
+    assert preserved_items[0]["booking_id"] == approved_id, f"preserved的应为#{approved_id}"
+    assert preserved_items[0]["week_phase_before"] == "preserved_approved"
+    assert preserved_items[0]["old_date"] == preserved_items[0]["new_date"]
+    print(f"  [PASS] 已审批预约 {approved_id} 正确 preserved, 日期未变")
+
+    success_items = [it for it in r["items"] if it["result"] == "success"]
+    assert len(success_items) == 3
+    for i, it in enumerate(success_items):
+        assert it["new_date"] == (new_start + timedelta(weeks=i)).isoformat()
+        assert it["old_date"] != it["new_date"]
+        assert it["old_status"] == "pending"
+        assert it["week_phase_before"] == "adjustable"
+    print(f"  [PASS] 3条可调预约全部改期成功, 新日期正确, 日期链完整")
+
+    print(f"\n  --- 阶段3: 设置冲突场景, 验证部分成功部分拒绝 ---")
+    new_start2 = new_start + timedelta(weeks=1)
+    blocker_date = new_start2 + timedelta(weeks=2)
+    print(f"  在 {blocker_date} 预先创建并审批一个阻塞预约 (同房间同时段)")
+    r = api3("post", "/api/bookings", {
+        "room_id": room_id,
+        "date": blocker_date.isoformat(),
+        "start_time": "09:00", "end_time": "12:00",
+        "user_id": "blocker_user", "user_name": "冲突阻塞用户",
+        "purpose": "阻塞测试"
+    }, 201)
+    blocker_id = r["id"]
+    api3("post", f"/api/bookings/{blocker_id}/approve", {
+        "operator_id": "admin_tight", "operator_role": "admin", "note": "test"
+    }, 200)
+    print(f"  阻塞预约#{blocker_id}已审批")
+
+    print(f"  再次改期目标起始: {new_start2}, 第3周会与阻塞冲突")
+
+    r = api3("post", f"/api/bookings/batches/{batch_id}/reschedule", {
+        "new_start_date": new_start2.isoformat(),
+        "operator_id": "admin_tight", "operator_role": "admin",
+        "reason": "配置收紧+冲突场景 - 部分成功部分拒绝"
+    }, 200)
+
+    print(f"  >> 改期结果: total={r['total']}, success={r['success']}, preserved={r['preserved']}, denied={r['denied']}, skipped={r['skipped']}")
+    denied_codes = {it["error_code"] for it in r["items"] if it["result"] == "denied"}
+    print(f"  >> denied error_codes: {denied_codes}")
+    for it in r["items"]:
+        if it["result"] == "denied":
+            print(f"     #{it['booking_id']}: DENIED code={it['error_code']} msg={it.get('message','')[:60]}")
+
+    assert r["preserved"] == 1
+    assert r["success"] >= 1 and r["success"] <= 2, f"success应在1-2之间, 实际={r['success']}"
+    assert r["denied"] == 1, f"应有1条因冲突denied, 实际={r['denied']}"
+    assert 10016 in denied_codes, f"denied中应包含冲突码10016, 实际={denied_codes}"
+    assert r["total"] == r["success"] + r["preserved"] + r["denied"] + r["skipped"]
+    print(f"  [PASS] 部分成功部分拒绝正确: preserved=1, success={r['success']}, denied=1(10016), 无静默覆盖")
+
+    print(f"\n  --- 阶段4: 查询与导出结果一致 ---")
+    detail = api3("get", f"/api/bookings/batches/{batch_id}?operator_id=admin_tight&operator_role=admin")
+    export = requests.get(f"{BASE3}/api/bookings/batches/{batch_id}/export", params={
+        "operator_id": "admin_tight", "operator_role": "admin"
+    }).json()
+
+    query_ids = {b["id"]: b for b in detail["bookings"]}
+    export_ids = {b["id"]: b for b in export["bookings"]}
+    assert set(query_ids.keys()) == set(export_ids.keys()), "id集合不一致"
+    for bid, qb in query_ids.items():
+        eb = export_ids[bid]
+        assert qb["status"] == eb["status"], f"#{bid} status不一致"
+        assert qb["week_phase"] == eb["week_phase"], f"#{bid} week_phase不一致"
+        assert qb["date"] == eb["date"], f"#{bid} date不一致"
+        assert qb.get("old_date") == eb.get("old_date"), f"#{bid} old_date不一致"
+        assert qb.get("rescheduled_from_booking_id") == eb.get("rescheduled_from_booking_id")
+    print(f"  [PASS] 查询与导出一致: {len(query_ids)}条 booking 状态/日期/周次/改期追踪完全相同")
+
+    audit_q = requests.get(f"{BASE3}/api/audit", params={"batch_id": batch_id}).json()
+    audit_ids_q = {l["id"] for l in audit_q}
+    audit_ids_e = set()
+    for b in export["bookings"]:
+        for lg in b["audit_logs"]:
+            audit_ids_e.add(lg["id"])
+    for lg in export["batch_level_audit_logs"]:
+        audit_ids_e.add(lg["id"])
+    assert audit_ids_q == audit_ids_e, f"审计id集合不一致 query={audit_ids_q - audit_ids_e} export={audit_ids_e - audit_ids_q}"
+    print(f"  [PASS] 审计链路一致: {len(audit_ids_q)} 条审计 id 完全匹配")
+
+    assert export["config_snapshot"]["max_recurring_weeks_at_creation"] == max_at_creation
+    assert export["config_snapshot"]["max_recurring_weeks_current"] == max_at_operation
+    assert export["config_snapshot"]["env_var_name"] == "BOOKING_MAX_RECURRING_WEEKS"
+    assert 1 <= export["config_snapshot"]["min_recurring_weeks"] <= 52
+    assert 1 <= export["config_snapshot"]["absolute_max_recurring_weeks"] <= 520
+    print(f"  [PASS] 导出配置快照齐全: creation={max_at_creation}, current={max_at_operation}")
+
+    print(f"\n  [PASS] 跨重启配置收紧全链路验证通过 ✅")
+    print(f"     关键点: adjustable=3 > MAX=2 时不再整单抛10010, 而是逐周处理")
+    print(f"     关键点: 已审批预约 preserved, 可调预约逐周 slot/冲突检查")
+    print(f"     关键点: creation/operation 双轨规则值正确, 审计链路完整")
+    print(f"     关键点: 查询与导出完全一致")
+
+    # 清理 _PASS3/_FAIL3 统计, 避免影响主流程
+    print(f"\n========== 配置收紧专项结果: {_PASS2+_PASS3} 通过, {_FAIL2+_FAIL3} 失败 ==========")
+    if _FAIL2 + _FAIL3 > 0:
+        sys.exit(1)
+
+    return batch_id
+
+
+# ============================================================
 # 新功能总入口
 # ============================================================
 _EXPORT_BATCH_IDS = []
@@ -1947,6 +2157,20 @@ def main():
             except requests.exceptions.ConnectionError:
                 print(f"\n[FAIL] 无法连接 {BASE2}, 请先启动:")
                 print("  python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001")
+                sys.exit(1)
+        elif len(sys.argv) > 1 and sys.argv[1] == "--config-tightening":
+            try:
+                print("\n" + "="*70)
+                print("  配置收紧回归验证: MAX=4→2, 改期不整单拦截")
+                print("="*70)
+                print(f"  创建服务(MAX=4): {BASE2}")
+                print(f"  操作服务(MAX=2): {BASE3}")
+                test_batch_reschedule_config_tightening()
+            except requests.exceptions.ConnectionError as e:
+                print(f"\n[FAIL] 无法连接服务: {e}")
+                print("请先启动:")
+                print(f"  python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001")
+                print(f"  $env:BOOKING_MAX_RECURRING_WEEKS='2'; python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002")
                 sys.exit(1)
         elif len(sys.argv) > 1 and sys.argv[1] == "--new-features":
             try:
