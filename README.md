@@ -91,6 +91,9 @@ python test_sample.py
 | POST | `/api/bookings/{id}/reject` | 审批驳回 |
 | POST | `/api/bookings/{id}/cancel` | 取消预约 |
 | POST | `/api/bookings/expire` | 批量过期已过时间的预约 |
+| POST | `/api/bookings/batches/{id}/reschedule` | **批量改期**（调整批次中可调预约的日期/时段） |
+| POST | `/api/bookings/batches/{id}/cancel` | **整批取消**（批次中所有可取消的预约） |
+| GET | `/api/bookings/batches/{id}/export` | **批次导出**（含配置快照、审计日志、周次状态） |
 
 ### 审计日志
 
