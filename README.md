@@ -113,11 +113,38 @@ python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002
 
 ## 运行验收测试
 
+### 基础测试
+
 ```bash
 python test_sample.py
 ```
 
 脚本覆盖：主链路（配置→预约→审批→锁定）、重叠审批失败、居民取消他人预约失败、不在开放时段申请失败、持久性验证、周期预约全链路（部分冲突、权限控制、审批锁定、配置超限、审计链路、环境变量配置、重启一致性）。
+
+### 接手验收（新人必跑）
+
+接手验收脚本覆盖批量改期、整批取消、批次导出三条主链路，以及重启一致性、权限/状态冲突矩阵、边界用例，并验证导出金标准（查询一致、审计 id 集合一致、审计 id 单调递增）。
+
+单服务（MAX=4）：
+
+```bash
+python handoff_test.py
+```
+
+跨端口模拟重启（MAX=4 + MAX=2）：
+
+```bash
+python handoff_test.py --cross-port
+```
+
+运行 `--cross-port` 前需同时启动两个服务：
+
+```bash
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001
+$env:BOOKING_MAX_RECURRING_WEEKS="2"; python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002
+```
+
+退出码 0 = 全部通过，1 = 有失败。
 
 ---
 

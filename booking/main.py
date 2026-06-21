@@ -8,6 +8,7 @@ from booking.errors import BookingError, ErrorCode
 from booking.rooms import router as rooms_router
 from booking.bookings import router as bookings_router
 from booking.audit import router as audit_router
+from booking.batch_takeover_api import router as snapshots_router
 
 
 @asynccontextmanager
@@ -26,6 +27,7 @@ app = FastAPI(
 app.include_router(rooms_router)
 app.include_router(bookings_router)
 app.include_router(audit_router)
+app.include_router(snapshots_router)
 
 
 @app.exception_handler(BookingError)

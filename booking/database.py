@@ -119,6 +119,65 @@ def init_db():
 
         CREATE INDEX IF NOT EXISTS idx_audit_created
             ON audit_logs(created_at);
+
+        CREATE TABLE IF NOT EXISTS batch_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            batch_user_id TEXT NOT NULL,
+            operation_type TEXT NOT NULL
+                CHECK (operation_type IN ('reschedule', 'cancel', 'export')),
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'executed', 'rolled_back', 'cancelled')),
+            description TEXT NOT NULL DEFAULT '',
+            operator_id TEXT NOT NULL,
+            operator_role TEXT NOT NULL DEFAULT 'admin',
+            total_bookings INTEGER NOT NULL DEFAULT 0,
+            affected_bookings INTEGER NOT NULL DEFAULT 0,
+            preserved_bookings INTEGER NOT NULL DEFAULT 0,
+            config_snapshot TEXT NOT NULL,
+            operation_params TEXT,
+            operation_result TEXT,
+            rollback_result TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            executed_at TEXT,
+            rolled_back_at TEXT,
+            FOREIGN KEY (batch_id) REFERENCES booking_batches(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS snapshot_bookings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id INTEGER NOT NULL,
+            booking_id INTEGER NOT NULL,
+            room_id INTEGER NOT NULL,
+            room_name TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            date TEXT NOT NULL,
+            start_time TEXT NOT NULL,
+            end_time TEXT NOT NULL,
+            status TEXT NOT NULL,
+            purpose TEXT NOT NULL DEFAULT '',
+            old_date TEXT,
+            rescheduled_from_booking_id INTEGER,
+            week_phase TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY (snapshot_id) REFERENCES batch_snapshots(id) ON DELETE CASCADE,
+            FOREIGN KEY (booking_id) REFERENCES bookings(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_snapshots_batch
+            ON batch_snapshots(batch_id);
+
+        CREATE INDEX IF NOT EXISTS idx_snapshots_status
+            ON batch_snapshots(status);
+
+        CREATE INDEX IF NOT EXISTS idx_snapshots_operator
+            ON batch_snapshots(operator_id);
+
+        CREATE INDEX IF NOT EXISTS idx_snapshot_bookings_snapshot
+            ON snapshot_bookings(snapshot_id);
+
+        CREATE INDEX IF NOT EXISTS idx_snapshot_bookings_booking
+            ON snapshot_bookings(booking_id);
     """)
     conn.commit()
 

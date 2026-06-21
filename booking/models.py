@@ -174,6 +174,147 @@ class ErrorResponse(BaseModel):
     message: str
 
 
+# ============================================================
+# 批次接管与回滚中心模型
+# ============================================================
+
+class SnapshotStatus(str, Enum):
+    PENDING = "pending"
+    EXECUTED = "executed"
+    ROLLED_BACK = "rolled_back"
+    CANCELLED = "cancelled"
+
+
+class SnapshotOperationType(str, Enum):
+    RESCHEDULE = "reschedule"
+    CANCEL = "cancel"
+    EXPORT = "export"
+
+
+class SnapshotCreate(BaseModel):
+    batch_id: int
+    operation_type: SnapshotOperationType
+    operator_id: str = Field(..., min_length=1, max_length=50)
+    operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
+    description: str = Field(default="", max_length=500)
+    operation_params: dict | None = None
+
+
+class SnapshotExecute(BaseModel):
+    operator_id: str = Field(..., min_length=1, max_length=50)
+    operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
+    reason: str = Field(default="", max_length=500)
+
+
+class SnapshotRollback(BaseModel):
+    operator_id: str = Field(..., min_length=1, max_length=50)
+    operator_role: str = Field(default="admin", pattern="^(admin|staff|resident)$")
+    reason: str = Field(default="", max_length=500)
+
+
+class SnapshotBookingOut(BaseModel):
+    booking_id: int
+    room_id: int
+    room_name: str
+    user_id: str
+    date: str
+    start_time: str
+    end_time: str
+    status: BookingStatus
+    purpose: str
+    old_date: str | None = None
+    rescheduled_from_booking_id: int | None = None
+    week_phase: BookingWeekPhase
+
+
+class SnapshotConfigOut(BaseModel):
+    max_recurring_weeks_at_snapshot: int
+    min_recurring_weeks: int
+    absolute_max_recurring_weeks: int
+    default_max_recurring_weeks: int
+    env_var_name: str
+    snapshot_created_at: str
+
+
+class SnapshotConflictItem(BaseModel):
+    booking_id: int
+    conflict_type: str
+    message: str
+    current_snapshot_id: int | None = None
+    current_status: str | None = None
+
+
+class SnapshotConflictCheck(BaseModel):
+    has_conflict: bool
+    conflicts: list[SnapshotConflictItem]
+
+
+class SnapshotOperationResultItem(BaseModel):
+    booking_id: int | None = None
+    old_date: str | None = None
+    new_date: str | None = None
+    old_status: str | None = None
+    new_status: str | None = None
+    result: str
+    error_code: int | None = None
+    message: str | None = None
+    week_phase_before: str | None = None
+
+
+class SnapshotOperationResult(BaseModel):
+    snapshot_id: int
+    batch_id: int
+    operation: str
+    total: int
+    success: int
+    preserved: int
+    skipped: int
+    denied: int
+    items: list[SnapshotOperationResultItem]
+    executed_at: str | None = None
+
+
+class SnapshotOut(BaseModel):
+    id: int
+    batch_id: int
+    batch_user_id: str
+    operation_type: SnapshotOperationType
+    status: SnapshotStatus
+    description: str
+    operator_id: str
+    operator_role: str
+    total_bookings: int
+    affected_bookings: int
+    preserved_bookings: int
+    created_at: str
+    executed_at: str | None = None
+    rolled_back_at: str | None = None
+    config_snapshot: SnapshotConfigOut
+    operation_params: dict | None = None
+    booking_snapshots: list[SnapshotBookingOut]
+    conflict_check: SnapshotConflictCheck | None = None
+    operation_result: SnapshotOperationResult | None = None
+    rollback_result: SnapshotOperationResult | None = None
+    audit_logs: list[AuditLogOut] = []
+
+
+class SnapshotListItem(BaseModel):
+    id: int
+    batch_id: int
+    batch_user_id: str
+    operation_type: SnapshotOperationType
+    status: SnapshotStatus
+    description: str
+    operator_id: str
+    operator_role: str
+    total_bookings: int
+    affected_bookings: int
+    preserved_bookings: int
+    created_at: str
+    executed_at: str | None = None
+    rolled_back_at: str | None = None
+
+
 class BatchRescheduleCreate(BaseModel):
     new_start_date: date
     operator_id: str = Field(..., min_length=1, max_length=50)

@@ -1,0 +1,247 @@
+{
+  "snapshot_id": 97,
+  "batch_id": 149,
+  "bids": [
+    406,
+    407,
+    408
+  ],
+  "snapshot_before": {
+    "id": 97,
+    "batch_id": 149,
+    "batch_user_id": "test_user_takeover",
+    "operation_type": "reschedule",
+    "status": "executed",
+    "description": "重启前创建的快照",
+    "operator_id": "admin_takeover",
+    "operator_role": "admin",
+    "total_bookings": 3,
+    "affected_bookings": 1,
+    "preserved_bookings": 2,
+    "created_at": "2026-06-21 13:46:02",
+    "executed_at": "2026-06-21 13:46:02",
+    "rolled_back_at": null,
+    "config_snapshot": {
+      "max_recurring_weeks_at_snapshot": 4,
+      "min_recurring_weeks": 1,
+      "absolute_max_recurring_weeks": 52,
+      "default_max_recurring_weeks": 4,
+      "env_var_name": "BOOKING_MAX_RECURRING_WEEKS",
+      "snapshot_created_at": "2026-06-21T13:46:02.703580"
+    },
+    "operation_params": {
+      "new_start_date": "2026-08-03",
+      "new_start_time": "14:00",
+      "new_end_time": "16:00"
+    },
+    "booking_snapshots": [
+      {
+        "booking_id": 406,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "date": "2026-07-13",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "approved",
+        "purpose": "批次接管与回滚测试",
+        "old_date": null,
+        "rescheduled_from_booking_id": null,
+        "week_phase": "preserved_approved"
+      },
+      {
+        "booking_id": 407,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "date": "2026-07-20",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "pending",
+        "purpose": "批次接管与回滚测试",
+        "old_date": null,
+        "rescheduled_from_booking_id": null,
+        "week_phase": "adjustable"
+      },
+      {
+        "booking_id": 408,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "date": "2026-07-27",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "cancelled",
+        "purpose": "批次接管与回滚测试",
+        "old_date": null,
+        "rescheduled_from_booking_id": null,
+        "week_phase": "finished"
+      }
+    ],
+    "conflict_check": {
+      "has_conflict": false,
+      "conflicts": []
+    },
+    "operation_result": {
+      "snapshot_id": 97,
+      "batch_id": 149,
+      "operation": "reschedule",
+      "total": 3,
+      "success": 1,
+      "preserved": 2,
+      "skipped": 0,
+      "denied": 0,
+      "items": [
+        {
+          "booking_id": 406,
+          "old_date": "2026-07-13",
+          "new_date": "2026-07-13",
+          "old_status": "approved",
+          "new_status": "approved",
+          "result": "preserved",
+          "error_code": null,
+          "message": "Preserved (preserved approved)",
+          "week_phase_before": "preserved_approved"
+        },
+        {
+          "booking_id": 408,
+          "old_date": "2026-07-27",
+          "new_date": "2026-07-27",
+          "old_status": "cancelled",
+          "new_status": "cancelled",
+          "result": "preserved",
+          "error_code": null,
+          "message": "Preserved (finished)",
+          "week_phase_before": "finished"
+        },
+        {
+          "booking_id": 407,
+          "old_date": "2026-07-20",
+          "new_date": "2026-08-03",
+          "old_status": "pending",
+          "new_status": "pending",
+          "result": "success",
+          "error_code": null,
+          "message": null,
+          "week_phase_before": "adjustable"
+        }
+      ],
+      "executed_at": "2026-06-21 13:46:02"
+    },
+    "rollback_result": null,
+    "audit_logs": [
+      {
+        "id": 1346,
+        "booking_id": null,
+        "batch_id": 149,
+        "action": "snapshot_create",
+        "old_status": null,
+        "new_status": null,
+        "operator_id": "admin_takeover",
+        "operator_role": "admin",
+        "detail": "Created snapshot #97 for batch #149, operation=reschedule, affected=1, preserved=2. Description: 重启前创建的快照",
+        "created_at": "2026-06-21 13:46:02"
+      },
+      {
+        "id": 1347,
+        "booking_id": null,
+        "batch_id": 149,
+        "action": "snapshot_execute_start",
+        "old_status": null,
+        "new_status": null,
+        "operator_id": "admin_takeover",
+        "operator_role": "admin",
+        "detail": "Starting execution of snapshot #97, operation=reschedule, reason=重启前执行",
+        "created_at": "2026-06-21 13:46:02"
+      },
+      {
+        "id": 1348,
+        "booking_id": 407,
+        "batch_id": 149,
+        "action": "reschedule",
+        "old_status": "pending",
+        "new_status": "pending",
+        "operator_id": "admin_takeover",
+        "operator_role": "admin",
+        "detail": "Snapshot #97 reschedule: 2026-07-20 10:00:00-12:00:00 -> 2026-08-03 14:00-16:00. Reason: 重启前执行. max_recurring_weeks_at_operation=4",
+        "created_at": "2026-06-21 13:46:02"
+      },
+      {
+        "id": 1349,
+        "booking_id": null,
+        "batch_id": 149,
+        "action": "snapshot_execute_end",
+        "old_status": null,
+        "new_status": null,
+        "operator_id": "admin_takeover",
+        "operator_role": "admin",
+        "detail": "Finished execution of snapshot #97: success=1, preserved=2, skipped=0, denied=0",
+        "created_at": "2026-06-21 13:46:02"
+      }
+    ]
+  },
+  "detail_before": {
+    "id": 149,
+    "user_id": "test_user_takeover",
+    "total_count": 3,
+    "success_count": 3,
+    "skip_count": 0,
+    "denied_count": 0,
+    "exceeded_count": 0,
+    "max_recurring_weeks_at_creation": 4,
+    "created_at": "2026-06-21 13:46:02",
+    "bookings": [
+      {
+        "id": 406,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "batch_id": 149,
+        "date": "2026-07-13",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "approved",
+        "purpose": "批次接管与回滚测试",
+        "created_at": "2026-06-21 13:46:02",
+        "updated_at": "2026-06-21 13:46:02",
+        "week_phase": "preserved_approved",
+        "old_date": null,
+        "rescheduled_from_booking_id": null
+      },
+      {
+        "id": 408,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "batch_id": 149,
+        "date": "2026-07-27",
+        "start_time": "10:00:00",
+        "end_time": "12:00:00",
+        "status": "cancelled",
+        "purpose": "批次接管与回滚测试",
+        "created_at": "2026-06-21 13:46:02",
+        "updated_at": "2026-06-21 13:46:02",
+        "week_phase": "finished",
+        "old_date": null,
+        "rescheduled_from_booking_id": null
+      },
+      {
+        "id": 407,
+        "room_id": 151,
+        "room_name": "重启测试_2026-06-21",
+        "user_id": "test_user_takeover",
+        "batch_id": 149,
+        "date": "2026-08-03",
+        "start_time": "14:00",
+        "end_time": "16:00",
+        "status": "pending",
+        "purpose": "批次接管与回滚测试",
+        "created_at": "2026-06-21 13:46:02",
+        "updated_at": "2026-06-21 13:46:02",
+        "week_phase": "adjustable",
+        "old_date": "2026-07-20",
+        "rescheduled_from_booking_id": 407
+      }
+    ]
+  }
+}
