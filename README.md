@@ -4,26 +4,30 @@
 
 ## 快速启动
 
+### 安装依赖
+
 ```bash
 pip install -r requirements.txt
+```
+
+### 启动服务
+
+```bash
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
 ```
 
-启动后访问 http://127.0.0.1:8000/docs 查看 Swagger 交互式文档。
+默认周期预约上限为 4 周。
 
-### 自定义周期预约上限
+### 自定义周期预约上限启动
 
-周期预约的最大周数通过环境变量 `BOOKING_MAX_RECURRING_WEEKS` 配置：
+通过环境变量 `BOOKING_MAX_RECURRING_WEEKS` 配置周期预约最大周数：
 
 ```bash
-# 默认启动（上限 4 周）
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
 
-# 自定义上限为 8 周（Windows PowerShell）
 $env:BOOKING_MAX_RECURRING_WEEKS="8"
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
 
-# 自定义上限为 8 周（Linux/macOS）
 BOOKING_MAX_RECURRING_WEEKS=8 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -35,7 +39,19 @@ BOOKING_MAX_RECURRING_WEEKS=8 python -m uvicorn booking.main:app --host 127.0.0.
 | 绝对上限 | `52`（超过 52 自动截断为 52） |
 | 无效值处理 | 非数字或缺失时回退到默认值 4 |
 
-可通过接口实时查询当前生效的配置：
+### 验证服务运行
+
+启动后访问以下端点确认服务正常：
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+正常返回 HTTP 200 即表示服务已启动。
+
+访问 http://127.0.0.1:8000/docs 查看 Swagger 交互式文档。
+
+查询当前周期预约配置：
 
 ```bash
 curl http://127.0.0.1:8000/api/bookings/recurring/config
@@ -52,6 +68,48 @@ curl http://127.0.0.1:8000/api/bookings/recurring/config
   "env_var_name": "BOOKING_MAX_RECURRING_WEEKS"
 }
 ```
+
+### 停止服务
+
+在启动该服务的终端按 Ctrl+C 即可停止服务。
+
+如需用进程管理工具停止，必须先确认目标 PID 归属当前项目：
+
+```bash
+netstat -ano | findstr :8000
+```
+
+找到监听该端口的 PID 后，核对命令行和工作目录归属当前项目，再执行：
+
+```bash
+Stop-Process -Id <PID>
+```
+
+禁止按进程名批量结束进程。
+
+### 重启服务（更换配置）
+
+如需以不同周期预约上限重启服务：
+
+1. 在原终端按 Ctrl+C 停止当前服务
+2. 设置新的环境变量后重新启动：
+
+```bash
+$env:BOOKING_MAX_RECURRING_WEEKS="2"
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8000
+```
+
+3. 用健康检查端点确认新服务已启动
+4. 用配置查询端点确认新规则已生效
+
+如不想停掉原有服务，也可在另一个端口启动新实例：
+
+```bash
+$env:BOOKING_MAX_RECURRING_WEEKS="2"
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002
+```
+
+---
 
 ## 运行验收测试
 
@@ -152,6 +210,11 @@ pending ──approve──> approved ──cancel──> cancelled
 | 10009 | INVALID_TIME_RANGE | start_time 必须早于 end_time |
 | 10010 | BATCH_LIMIT_EXCEEDED | 周期预约周数超过当前配置上限 |
 | 10011 | BATCH_NOT_FOUND | 批次不存在 |
+| 10012 | BOOKING_ALREADY_IN_EFFECT | 预约已生效（日期已过或时段已开始） |
+| 10013 | BOOKING_APPROVED_PROTECTED | 已审批预约受保护，不可改期，需单独取消 |
+| 10014 | BATCH_NOTHING_TO_OPERATE | 批次中无符合条件的可操作预约（全部已生效、已审批、已结束） |
+| 10015 | NEW_SLOT_NOT_OPEN | 改期目标时间不在任何开放时段内 |
+| 10016 | NEW_BOOKING_OVERLAP | 改期目标时间与已审批预约冲突 |
 
 所有业务错误返回 HTTP 422，响应体为：
 
@@ -329,13 +392,10 @@ curl "http://127.0.0.1:8000/api/bookings/batches/1/export?operator_id=admin1&ope
 **辅助回查端点：**
 
 ```bash
-# 查看批次详情（含每条预约的 week_phase）
 curl "http://127.0.0.1:8001/api/bookings/batches/{batch_id}?operator_id=admin1&operator_role=admin"
 
-# 按 batch_id 查审计日志（按 id 升序，可与导出的审计 id 集合比对）
 curl "http://127.0.0.1:8001/api/audit?batch_id={batch_id}"
 
-# 查询当前生效的 MAX 规则
 curl "http://127.0.0.1:8001/api/bookings/recurring/config"
 ```
 
@@ -350,7 +410,6 @@ curl "http://127.0.0.1:8001/api/bookings/recurring/config"
 **前置：** 空库或干净状态。
 
 ```bash
-# P1-1 创建房间（room_id 会返回）
 curl -X POST http://127.0.0.1:8001/api/rooms \
   -H "Content-Type: application/json" \
   -d '{"name": "复核专用_排练厅", "description": "三条链路共用测试房"}'
@@ -363,9 +422,6 @@ curl -X POST http://127.0.0.1:8001/api/rooms \
 ---
 
 ```bash
-# P1-2 配置时段：周一 09:00-22:00、周三 09:00-22:00
-#       （周一用来做批次，周三用来制造"slot 不开放"的冲突场景）
-# 把下面的 {ROOM_ID} 换成上一步返回的数字
 curl -X POST http://127.0.0.1:8001/api/rooms/{ROOM_ID}/timeslots \
   -H "Content-Type: application/json" \
   -d '{"slots": [
@@ -383,7 +439,6 @@ curl -X POST http://127.0.0.1:8001/api/rooms/{ROOM_ID}/timeslots \
 > 选择周一起始，是为后续把改期目标设到周三（slot 不开放）制造冲突用。
 
 ```bash
-# 注意：start_date 必须是一个**未来的周一**。今天 2026-06-21 → 写 2026-07-06（周一）
 curl -X POST http://127.0.0.1:8001/api/bookings/recurring \
   -H "Content-Type: application/json" \
   -d '{
@@ -416,17 +471,13 @@ curl -X POST http://127.0.0.1:8001/api/bookings/recurring \
 #### Step P3：制造混合状态（1 审批 + 1 取消 + 2 待审批）
 
 ```bash
-# P3-1 审批第1周（制造 preserved_approved 相位）
 curl -X POST http://127.0.0.1:8001/api/bookings/{BID_1}/approve \
   -H "Content-Type: application/json" \
   -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "复核:审批一条以保护"}'
-# 期望：status = "approved"
 
-# P3-2 居民自己取消第4周（制造 finished 相位）
 curl -X POST http://127.0.0.1:8001/api/bookings/{BID_4}/cancel \
   -H "Content-Type: application/json" \
   -d '{"operator_id": "zhangsan", "operator_role": "resident", "reason": "复核:取消最后一周制造finished"}'
-# 期望：status = "cancelled"
 ```
 
 **成功判断：** 两个请求都是 HTTP 200，status 分别为 `approved` 和 `cancelled`。
@@ -488,10 +539,10 @@ curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/export?operator_i
 **审计 id 集合一致性核对（关键！基线必须过这一关）：**
 
 ```bash
-# 方法：用 /api/audit 端点查到的 id 集合，与导出里 booking.audit_logs[].id + batch_level_audit_logs[].id 的并集，必须完全相等
 curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID}" > audit_baseline.json
-# 手动或脚本比较：set(导出id) == set(/api/audit返回的id)
 ```
+
+用 `/api/audit` 端点查到的 id 集合，与导出里 booking.audit_logs[].id + batch_level_audit_logs[].id 的并集，必须完全相等。
 
 **基线通过上述所有检查 → 进入三条链路正式复核。**
 
@@ -504,7 +555,6 @@ curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID}" > audit_baseline.j
 **前置：** 已完成第一部分前置数据准备。
 
 ```bash
-# R1-1 用 other_resident（非批次创建者）尝试改期
 curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" \
   -H "Content-Type: application/json" \
   -d '{
@@ -533,7 +583,6 @@ curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" 
 **前置：** 房间只配置了周一（weekday 0）和周三（weekday 2）。把 `new_start_date` 写一个**周五**（例如 2026-08-14 是周五，weekday=4），该 weekday 完全无时段配置 → 所有 adjustable 的都会被 10015 拒绝。
 
 ```bash
-# R1-2 改期目标: 周五（weekday=4，slot 完全不开放）
 curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" \
   -H "Content-Type: application/json" \
   -d '{
@@ -584,7 +633,6 @@ curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID}"
 ```
 
 - 不应出现任何 `action = "reschedule"` 条目
-- 不应出现 `batch_reschedule_start` 和 `batch_reschedule_end`（因为整体**有可操作预约**，但单条被拒 —— 注意：实际行为是 **start/end 会写入**，因为批次级开始/结束了，只是单条没有 reschedule）
 - 正确判定：`batch_reschedule_start` 和 `batch_reschedule_end` **会有**，但单条没有 `reschedule`
 
 **导出核对：**
@@ -605,7 +653,6 @@ curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/export?operator_i
 **前置：** 先在"改期后的第 3 周那个周一"创建一个 approved 预约作为冲突源。假设 R1-3 改期起始日期为 `2026-08-10`（周一），则第 3 周 = `2026-08-24`。先在这天放一个阻塞：
 
 ```bash
-# R1-3-pre 在 2026-08-24（改期目标第3周同日同时段）创建并审批一个阻塞预约
 curl -X POST http://127.0.0.1:8001/api/bookings \
   -H "Content-Type: application/json" \
   -d '{
@@ -616,14 +663,12 @@ curl -X POST http://127.0.0.1:8001/api/bookings \
     "end_time": "12:00",
     "purpose": "复核:阻塞改期第3周制造冲突"
   }'
-# 记录返回的 booking_id 为 BLOCKER_ID，然后审批
 curl -X POST http://127.0.0.1:8001/api/bookings/{BLOCKER_ID}/approve \
   -H "Content-Type: application/json" \
   -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "复核:审批阻塞预约"}'
 ```
 
 ```bash
-# R1-3 正式改期：起始 2026-08-10（周一），共 2 条可调（BID_2,BID_3），其中 BID_3 对应第3周会撞 BLOCKER_ID
 curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" \
   -H "Content-Type: application/json" \
   -d '{
@@ -681,7 +726,6 @@ curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/export?operator_i
 **前置：** 经过 R1-3，现在只有 BID_3 是 `adjustable`。
 
 ```bash
-# R1-4 改期 BID_3 到一个干净日期（比如 2026-09-07 周一），同时把时段调到 14:00-16:00
 curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" \
   -H "Content-Type: application/json" \
   -d '{
@@ -699,16 +743,13 @@ curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" 
 | 字段 | 期望值 |
 |------|--------|
 | `success` | 1 |
-| `preserved` | 3（BID_1 approved + BID_2 已改期但仍 pending=adjustable？不，BID_2 pending 应该是 adjustable —— 应该 preserved=2：BID_1 + BID_4） |
 | `preserved` | 2（BID_1: approved, BID_4: cancelled=finished） |
 | `denied` | 0 |
 | `items` 中 BID_3 的 `new_date` | `"2026-09-07"` |
 | `items` 中 BID_3 的 `old_date` | `"2026-07-20"` |
-| `items` 中 BID_3 的 `new_start_time` / `new_end_time` | 不在 items 里，要回查批次详情看 `start_time`/`end_time` 字段 |
 
 **批次详情回查（时间段确实改了）：**
 - BID_3：`date = "2026-09-07"`, `start_time = "14:00"`, `end_time = "16:00"`, `old_date = "2026-07-20"`, `rescheduled_from_booking_id = BID_3`
-- BID_2：保持 `start_time = "10:00"`, `end_time = "12:00"`（R1-3 没改时段，R1-4 只改 BID_3 的 —— 实际代码中改期是对所有 adjustable 统一改时段，所以 BID_2 在 R1-3 走的是 success，时段用的是 10:00-12:00；R1-4 改时段时 BID_2 已经是 adjustable，但 R1-4 只对 adjustable 的改，BID_2 是 adjustable 也会被改 —— 这个是代码逻辑，测试时要注意实际结果对照）
 
 > **实操提示：** 实际 items 中有几条 adjustable，就有几条会被改日期和时段。与批次详情回查值逐一比对即可。
 
@@ -722,21 +763,15 @@ curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/reschedule" 
 
 ### 前置：建第二个批次（链路二专用）
 
-**执行 Step P1-P4 的简化版，或直接用新房间新批次：**
-
 ```bash
-# C-pre-1 新建房间（或复用第一个房间，日期选新的）
 curl -X POST http://127.0.0.1:8001/api/rooms \
   -H "Content-Type: application/json" \
   -d '{"name": "复核专用_会议室B", "description": "链路二整批取消"}'
-# 记为 ROOM_ID_2
 
-# C-pre-2 配置周一全天开放
 curl -X POST http://127.0.0.1:8001/api/rooms/{ROOM_ID_2}/timeslots \
   -H "Content-Type: application/json" \
   -d '{"slots": [{"weekday": 0, "start_time": "08:00", "end_time": "22:00"}]}'
 
-# C-pre-3 新建 3 周周期预约（每周一 15:00-17:00），起始 2026-08-03（周一）
 curl -X POST http://127.0.0.1:8001/api/bookings/recurring \
   -H "Content-Type: application/json" \
   -d '{
@@ -748,9 +783,7 @@ curl -X POST http://127.0.0.1:8001/api/bookings/recurring \
     "purpose": "链路二整批取消_每周例会",
     "weeks": 3
   }'
-# 记 batch_id 为 BATCH_ID_2，三条 booking 为 C_BID_1, C_BID_2, C_BID_3
 
-# C-pre-4 审批第1周（制造 1 条 preserved_approved + 2 条 adjustable）
 curl -X POST http://127.0.0.1:8001/api/bookings/{C_BID_1}/approve \
   -H "Content-Type: application/json" \
   -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "链路二:先审批一条"}'
@@ -850,7 +883,7 @@ curl -X POST "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID_2}/cancel" \
 
 **批次详情回查：** C_BID_1 `status = "cancelled"`。
 
-**审计日志核对（**关键判定 —— 管理员的 cancel 日志 detail 前缀不一样**）：**
+**审计日志核对（关键判定 —— 管理员的 cancel 日志 detail 前缀不一样）：**
 - C_BID_1 出现了一条新的 `action = "cancel"`，`detail` 前缀是 `"Admin/staff batch cancel approved booking"`（和居民的 `"Batch cancel"` 前缀**不同**，可用于审计追溯是谁批量取消了已审批预约）
 - 出现一组新的 `batch_cancel_start` + `batch_cancel_end`，detail 含 `operator_role=admin` 和 `success=1, skipped=2`
 
@@ -909,7 +942,6 @@ curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID_2}/export?operator
 | `.batch.success_count` | 3 |
 | `.batch.max_recurring_weeks_at_creation` | 4 |
 | `.batch.current_max_recurring_weeks` | 4 |
-| `.batch.env_var_name`（在 batch 内） | 没在 batch 里，在 config_snapshot 里 —— 见下 |
 | `.config_snapshot.max_recurring_weeks_at_creation` | 4 |
 | `.config_snapshot.max_recurring_weeks_current` | 4 |
 | `.config_snapshot.min_recurring_weeks` | 1 |
@@ -935,7 +967,6 @@ curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID_2}/export?operator
 **金标准 1：bookings 字段与批次详情查询 100% 一致**
 
 ```bash
-# 取批次详情（JSON）
 curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID_2}?operator_id=admin1&operator_role=admin" \
   > batch_{BATCH_ID_2}_detail.json
 ```
@@ -966,12 +997,9 @@ curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID_2}" > audit_{BATCH_I
 ### S0：保存重启前快照（在现有端口 8001 上执行）
 
 ```bash
-# 选链路一的 BATCH_ID（经过了多次改期，数据最丰富）做这个场景
-# 导出：
 curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}/export?operator_id=admin1&operator_role=admin" \
   -o batch_{BATCH_ID}_before_restart.json
 
-# 同时保存批次详情和审计查询
 curl -s "http://127.0.0.1:8001/api/bookings/batches/{BATCH_ID}?operator_id=admin1&operator_role=admin" \
   -o batch_{BATCH_ID}_detail_before.json
 curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID}" \
@@ -984,24 +1012,34 @@ curl -s "http://127.0.0.1:8001/api/audit?batch_id={BATCH_ID}" \
 - audit 日志总条数（记为 `N_AUDIT_BEFORE`）
 - `MAX_BEFORE` = 当前规则，查询 `curl http://127.0.0.1:8001/api/bookings/recurring/config` 得到
 
-### S1：停止端口 8001 的服务
+### S1：停止当前服务
 
-> ⚠️ **只允许停止你自己启动的单个 PID。**
->
-> 方法：之前启动 8001 的那个终端按 Ctrl+C 即可。
->
-> 也可以用 `Stop-Process -Id <PID>`，但必须：1) 是你启动的那个；2) 核对过端口、命令行、工作目录归属当前项目。
+在启动端口 8001 服务的终端按 Ctrl+C 停止该服务。
 
-按 Ctrl+C 关闭终端 2 运行的 8001 服务（命令 id `480cce86-e2e1-4379-b814-9ac0cf757ed1`）。
-
-### S2：端口 8002 以 MAX=2 重启（配置收紧）
+如需用进程管理工具停止，必须先确认目标 PID 归属当前项目：
 
 ```bash
-# 新开终端（终端 3）
-# Windows PowerShell 设置环境变量后启动
+netstat -ano | findstr :8001
+```
+
+找到监听该端口的 PID 后，核对命令行和工作目录归属当前项目，再执行：
+
+```bash
+Stop-Process -Id <PID>
+```
+
+禁止按进程名批量结束进程。
+
+### S2：以新配置重启（配置收紧 MAX=2）
+
+在原终端或新终端中设置环境变量后启动：
+
+```bash
 $env:BOOKING_MAX_RECURRING_WEEKS="2"
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002
 ```
+
+如果不想停掉 8001 端口的服务，也可以直接在另一个端口启动新实例。此时 8001 端口（MAX=4）和 8002 端口（MAX=2）同时运行，后续操作指向 8002 即可。
 
 ### S3：确认新端口规则生效（确认是 2，防止环境变量没带上）
 
@@ -1021,14 +1059,12 @@ curl http://127.0.0.1:8002/api/bookings/recurring/config
 > - adjustable 条数（1条）< MAX_AFTER（2），但如果 adjustable 条数（比如 3 条）> MAX_AFTER（2），**不会被整单抛 10010**，而是逐周处理（这是和"新建周期预约"的本质区别：新建时 10010 整单拦，改期时不拦，逐周检查 slot 和冲突）。
 
 ```bash
-# 先确认旧批次在 8002 上仍可调（查详情）
 curl "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}?operator_id=admin1&operator_role=admin"
 ```
 
 关键字段：`max_recurring_weeks_at_creation` 必须仍是 4（数据库存的，不会因为重启变）。
 
 ```bash
-# S4-改期：选一个干净周一（比如 2026-09-21），管理员操作
 curl -X POST "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}/reschedule" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1043,10 +1079,10 @@ curl -X POST "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}/reschedule" 
 
 | 字段 | 期望值 | 说明 |
 |------|--------|------|
-| `max_recurring_weeks_at_creation` | **4**（= `CREATION_MAX`） | 批次创建时的规则，数据库存的，重启后仍 4 ✅ |
-| `max_recurring_weeks_at_operation` | **2**（= `MAX_AFTER`） | 本次操作时服务的当前规则，重启后变成 2 ✅ |
-| adjustable 条数 > MAX_AFTER 时 | **不会整单抛 10010** | 改期不检查 adjustable 数量与 MAX 的关系，只逐周 slot/冲突 ✅ |
-| success 的预约数（N_success） | = adjustable 中通过 slot+冲突校验的条数 | ✅ |
+| `max_recurring_weeks_at_creation` | **4**（= `CREATION_MAX`） | 批次创建时的规则，数据库存的，重启后仍 4 |
+| `max_recurring_weeks_at_operation` | **2**（= `MAX_AFTER`） | 本次操作时服务的当前规则，重启后变成 2 |
+| adjustable 条数 > MAX_AFTER 时 | **不会整单抛 10010** | 改期不检查 adjustable 数量与 MAX 的关系，只逐周 slot/冲突 |
+| success 的预约数（N_success） | = adjustable 中通过 slot+冲突校验的条数 | |
 
 **单条 reschedule 审计日志的 detail 检查（关键 —— operation 规则值写进了每条日志）：**
 
@@ -1084,7 +1120,6 @@ curl -s "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}/export?operator_i
 ### S6：重启后整批取消 + 导出（两条链路也验证重启一致性）
 
 ```bash
-# S6-1 重启后管理员再整批取消一次 BATCH_ID
 curl -X POST "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}/cancel" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1133,17 +1168,15 @@ curl -X POST "http://127.0.0.1:8002/api/bookings/batches/{BATCH_ID}/cancel" \
 
 ---
 
-## 一键全自动验证脚本（把上述全部命令编成了自动化）
+## 一键全自动验证脚本
 
 所有链路 + 复杂场景 + 冲突矩阵 + 重启一致性，都已编成可运行脚本。管理员无需手敲上面的每一条 curl，直接跑即可：
 
 ### 一键跑：三条链路 + 冲突矩阵（不重启）
 
 ```bash
-# 终端 A：启动 MAX=4 服务（端口 8001）
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001
 
-# 终端 B（另开）：一键跑完链路一二三 + 重启前阶段
 python test_sample.py --new-features
 ```
 
@@ -1167,14 +1200,11 @@ python test_sample.py --new-features
 > 这是本文档"第二大类复杂场景"的完整自动化（真实启动两个端口模拟重启前后）。
 
 ```bash
-# 终端 A（MAX=4，端口 8001）：
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8001
 
-# 终端 B（MAX=2，端口 8002）：
 $env:BOOKING_MAX_RECURRING_WEEKS="2"
 python -m uvicorn booking.main:app --host 127.0.0.1 --port 8002
 
-# 终端 C（执行跨端口配置收紧验证）：
 python test_sample.py --config-tightening
 ```
 
@@ -1255,26 +1285,4 @@ curl http://127.0.0.1:8000/api/bookings/recurring/config
 ### 权限控制
 - 居民只能查看和操作自己创建的批次
 - 管理员和工作人员可以查看所有批次
-- 子预约的审批、取消规则与单次预约完全一致
-
----
-
-## 数据存储
-
-使用 SQLite 文件 `booking.db`（项目根目录），服务重启后数据完整保留。
-
-## 项目结构
-
-```
-booking/
-  __init__.py   # 配置常量与环境变量读取
-  main.py       # FastAPI 应用入口
-  database.py   # SQLite 连接与表初始化
-  models.py     # Pydantic 数据模型
-  errors.py     # 错误码与异常
-  rooms.py      # 房间与时段路由
-  bookings.py   # 预约路由与状态机
-  audit.py      # 审计日志路由
-test_sample.py  # 验收测试脚本
-requirements.txt
-```
+- 子预约的

@@ -66,9 +66,9 @@ def main():
     r = requests.post(f"{BASE_CREATE}/api/bookings/recurring", json={
         "room_id": room_id,
         "start_date": start_date.isoformat(),
-        "weekday": 0, "start_time": "14:00", "end_time": "17:00",
+        "start_time": "14:00", "end_time": "17:00",
         "weeks": 4,
-        "user_id": "verify_user", "user_name": "验证用户",
+        "user_id": "verify_user",
         "purpose": "接口验证 - 配置收紧后改期"
     })
     assert r.status_code == 201, f"创建周期预约失败: {r.text}"
@@ -85,7 +85,7 @@ def main():
     assert len(booking_ids) == 4, "应创建4条预约"
 
     r = requests.post(f"{BASE_CREATE}/api/bookings/{booking_ids[0]}/approve", json={
-        "operator_id": "admin_verify", "operator_role": "admin", "note": "验证用"
+        "operator_id": "admin_verify", "operator_role": "admin", "reason": "验证用"
     })
     assert r.status_code == 200, f"审批失败: {r.text}"
     print(f"  [OK] 审批 #{booking_ids[0]} -> approved (preserved_approved 相位)")
@@ -179,12 +179,12 @@ def main():
         "room_id": room_id,
         "date": blocker_date.isoformat(),
         "start_time": "14:00", "end_time": "17:00",
-        "user_id": "blocker_verify", "user_name": "阻塞用户",
+        "user_id": "blocker_verify",
         "purpose": "阻塞冲突验证"
     })
     blocker_id = r.json()["id"]
     r = requests.post(f"{BASE_OPERATE}/api/bookings/{blocker_id}/approve", json={
-        "operator_id": "admin_verify", "operator_role": "admin", "note": "验证用"
+        "operator_id": "admin_verify", "operator_role": "admin", "reason": "验证用"
     })
     print(f"  [OK] 创建阻塞预约 #{blocker_id}, 日期={blocker_date}, 已审批")
 

@@ -567,6 +567,11 @@ def reschedule_batch(batch_id: int, body: BatchRescheduleCreate):
     if body.new_start_time is not None and body.new_end_time is not None:
         if body.new_start_time >= body.new_end_time:
             raise BookingError(ErrorCode.INVALID_TIME_RANGE)
+    if (body.new_start_time is None) != (body.new_end_time is None):
+        raise BookingError(
+            ErrorCode.INVALID_TIME_RANGE,
+            "new_start_time and new_end_time must be provided together or both omitted"
+        )
 
     with get_db() as conn:
         batch_row = _check_batch_access(conn, batch_id, body.operator_id, body.operator_role)
@@ -617,10 +622,6 @@ def reschedule_batch(batch_id: int, body: BatchRescheduleCreate):
             if body.new_end_time is not None
             else original_end_time
         )
-
-        if body.new_start_time is not None and body.new_end_time is not None:
-            if body.new_start_time >= body.new_end_time:
-                raise BookingError(ErrorCode.INVALID_TIME_RANGE)
 
         items: list[BatchOperationItem] = []
         success_count = 0
@@ -1036,6 +1037,7 @@ def export_batch(
         per_booking_logs = [
             {
                 "id": log["id"],
+                "booking_id": log["booking_id"],
                 "action": log["action"],
                 "old_status": log["old_status"],
                 "new_status": log["new_status"],

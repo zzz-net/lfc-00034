@@ -1887,9 +1887,9 @@ def test_batch_reschedule_config_tightening():
     r = api2("post", "/api/bookings/recurring", {
         "room_id": room_id,
         "start_date": next_mon_4weeks.isoformat(),
-        "weekday": 0, "start_time": "09:00", "end_time": "12:00",
+        "start_time": "09:00", "end_time": "12:00",
         "weeks": 4,
-        "user_id": "user_tight", "user_name": "收紧配置测试用户",
+        "user_id": "user_tight",
         "purpose": "测试MAX收紧后改期不被整单拦截"
     }, 201)
     batch_id = r["batch_id"]
@@ -1902,7 +1902,7 @@ def test_batch_reschedule_config_tightening():
 
     approved_id = booking_ids[0]
     api2("post", f"/api/bookings/{approved_id}/approve", {
-        "operator_id": "admin_tight", "operator_role": "admin", "note": "test"
+        "operator_id": "admin_tight", "operator_role": "admin", "reason": "test"
     }, 200)
     print(f"  审批 #{approved_id} 为 approved (preserved_approved 相位, 改期时会 preserved)")
 
@@ -1967,12 +1967,12 @@ def test_batch_reschedule_config_tightening():
         "room_id": room_id,
         "date": blocker_date.isoformat(),
         "start_time": "09:00", "end_time": "12:00",
-        "user_id": "blocker_user", "user_name": "冲突阻塞用户",
+        "user_id": "blocker_user",
         "purpose": "阻塞测试"
     }, 201)
     blocker_id = r["id"]
     api3("post", f"/api/bookings/{blocker_id}/approve", {
-        "operator_id": "admin_tight", "operator_role": "admin", "note": "test"
+        "operator_id": "admin_tight", "operator_role": "admin", "reason": "test"
     }, 200)
     print(f"  阻塞预约#{blocker_id}已审批")
 
