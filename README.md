@@ -2048,3 +2048,323 @@ python batch_takeover_test.py
 | 10022 | SNAPSHOT_CONFLICT | 快照占用冲突 | 创建时同一批 booking 被其他 pending/executed 快照占用 |
 | 10023 | SNAPSHOT_BOOKING_CHANGED | 预约已变化 | 执行前发现 booking 的 date/time/status 与快照创建时不一致；回退时发现目标状态不等于执行后期望状态 |
 | 10024 | SNAPSHOT_OPERATION_NOT_ALLOWED | 无执行/回退权限 | resident 角色尝试调用 /execute、/rollback、/cancel |
+
+---
+
+## 重构说明（2025版 · 根因修复）
+
+### 修复的核心问题
+
+#### 1. 旧库无法启动（根因：表创建顺序错误 + 重复ALTER TABLE）
+
+**问题现象**：已有数据的数据库重启时，`bookings` 表引用 `booking_batches` 外键，但 `booking_batches` 表尚未创建，导致外键约束失败。`audit_logs` 引用 `batch_snapshots` 也有同样问题。
+
+**修复方案**：
+- 引入 `SCHEMA_VERSION` 版本化迁移机制（当前版本=2）
+- 表创建顺序严格按照依赖关系：`rooms → time_slots → booking_batches → bookings → batch_snapshots → audit_logs → snapshot_bookings`
+- 每个 `ALTER TABLE` 操作独立封装，先检查列是否存在再执行，避免重复执行报错
+- 服务启动时自动检测版本并增量升级，旧库无需手动迁移
+
+**关键代码**：[database.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/database.py) `init_db()` 函数
+
+---
+
+#### 2. 批量回滚判定不准（根因：用批次参数硬套整批数据）
+
+**问题现象**：多周改期后回滚时，代码用 `operation_params.new_start_date`（第一周的日期）来验证所有记录。对于第2、3...N周的记录，实际日期是 `new_start_date + (i-1)*7`，与第一周日期不匹配，导致全部被误判为"外部修改"而拒绝回滚。
+
+**修复方案**：
+- **执行阶段**：每条记录独立计算 `expected_new_date`、`expected_new_start_time`、`expected_new_end_time`、`expected_new_status`，并持久化到 `operation_result` 的每条 item 中
+- **回滚阶段**：从 `operation_result` 读取每条记录的独立基线，而非从 `operation_params` 读取批次参数
+- **冲突检测**：只检查 `execution_result == "success"` 的记录，preserved/denied/skipped 的记录不做状态校验
+- **部分回滚**：有冲突的记录标记 denied 并给出 expected/actual 差异，无冲突的记录正常回退，互不影响
+
+**关键代码**：
+- [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_build_reschedule_execution_baseline()` - 构建执行基线
+- [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_build_rollback_baseline_from_execution_result()` - 从执行结果构建回滚基线
+- [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_check_rollback_conflict_for_item()` - 单条记录冲突检测
+
+---
+
+#### 3. 新增：批量变更结果比对接口
+
+**功能**：比对快照执行结果与数据库当前状态，给出逐条 expected/actual 差异。
+
+**API**：`GET /api/snapshots/{id}/compare`
+
+**返回结构**：
+```json
+{
+  "snapshot_id": 1,
+  "has_result": true,
+  "all_match": false,
+  "total_items": 3,
+  "changed_count": 1,
+  "unchanged_count": 2,
+  "denied_or_preserved_count": 0,
+  "changed_items": [
+    {
+      "booking_id": 101,
+      "execution_result": "success",
+      "expected": {"date": "2026-08-10", "start_time": "14:00", "end_time": "15:00", "status": "pending"},
+      "actual": {"date": "2026-08-10", "start_time": "10:00", "end_time": "11:00", "status": "pending"},
+      "matches": false,
+      "field_diffs": [
+        {"field": "start_time", "expected_value": "14:00", "actual_value": "10:00"},
+        {"field": "end_time", "expected_value": "15:00", "actual_value": "11:00"}
+      ]
+    }
+  ],
+  "unchanged_items": [...],
+  "all_comparison_items": [...]
+}
+```
+
+---
+
+### 职责拆分
+
+| 职责 | 位置 | 说明 |
+|------|------|------|
+| 数据库初始化/迁移 | [database.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/database.py) | 版本化管理，增量升级，表创建顺序正确 |
+| 快照基线构建 | [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_build_*_baseline()` | 执行前计算每条记录的预期值 |
+| 执行结果持久化 | [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_execute_*()` | 每条记录的 expected_* 写入 operation_result |
+| 审计落库 | [audit.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/audit.py) | 与快照关联，事务内写入 |
+| 回滚基线读取 | [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_build_rollback_baseline_from_execution_result()` | 从 operation_result 读取，不从 params 读取 |
+| 单条冲突检测 | [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `_check_rollback_conflict_for_item()` | 逐条校验，expected/actual 清晰 |
+| 批量结果比对 | [batch_takeover.py](file:///d:/workSpace/AI__SPACE/lfc-00034/booking/batch_takeover.py) `compare_snapshot_execution_result()` | 独立比对接口 |
+
+---
+
+## 重构后回归测试（4 场景 · 一键复现）
+
+### 前置条件
+
+```bash
+python -m uvicorn booking.main:app --host 127.0.0.1 --port 8003
+```
+
+### 场景1：旧库启动验证
+
+**目标**：验证已有数据的数据库能正常启动、读写正常
+
+```bash
+python batch_takeover_test.py --mode regression --base http://127.0.0.1:8003
+# 选择测试1
+```
+
+**覆盖断言**：
+- 健康检查正常
+- 配置接口可访问
+- 可查询已有批次
+- 可创建新批次并写入数据库
+
+---
+
+### 场景2：多周改期回滚基线验证（核心bug修复）
+
+**目标**：验证2条不同周次的记录回滚时，每条用自己的基线判断
+
+```bash
+# 完整脚本
+python batch_takeover_test.py --mode regression
+```
+
+**关键步骤（可手动复现）**：
+
+1. 创建2周批次：
+```bash
+# 创建房间和时段（略，见前文）
+
+# 创建2周周期预约
+curl -X POST http://127.0.0.1:8003/api/bookings/recurring \
+  -H "Content-Type: application/json" \
+  -d '{
+    "room_id": {ROOM_ID},
+    "user_id": "zhangsan",
+    "start_date": "2026-07-06",
+    "start_time": "10:00",
+    "end_time": "12:00",
+    "purpose": "回归测试_多周改期",
+    "weeks": 2
+  }'
+```
+记录 `BATCH_ID`，两条 booking：`BID_W1`（2026-07-06）、`BID_W2`（2026-07-13）。
+
+2. 创建改期快照（改到 2026-08-10 开始，周三）：
+```bash
+curl -X POST http://127.0.0.1:8003/api/snapshots \
+  -H "Content-Type: application/json" \
+  -d '{
+    "batch_id": {BATCH_ID},
+    "operator_id": "admin1",
+    "operator_role": "admin",
+    "operation_type": "reschedule",
+    "operation_params": {
+      "new_start_date": "2026-08-10",
+      "new_start_time": "14:00",
+      "new_end_time": "15:00"
+    },
+    "reason": "回归测试：多周改期"
+  }'
+```
+记录 `SNAPSHOT_ID`。查看详情确认预期日期：
+- W1 预期：2026-08-10（周三）
+- W2 预期：2026-08-17（周三 + 7天）
+
+3. 执行快照：
+```bash
+curl -X POST http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/execute \
+  -H "Content-Type: application/json" \
+  -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "执行多周改期"}'
+```
+
+4. 验证执行结果（两条都改到各自的新日期）：
+```bash
+curl "http://127.0.0.1:8003/api/bookings/batches/{BATCH_ID}?operator_id=admin1&operator_role=admin"
+```
+确认：
+- BID_W1 date = 2026-08-10
+- BID_W2 date = 2026-08-17
+
+5. 比对执行结果：
+```bash
+curl "http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/compare?operator_id=admin1&operator_role=admin"
+```
+返回 `all_match: true`。
+
+6. **核心验证**：回滚快照（每条用自己的基线）
+```bash
+curl -X POST http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/rollback \
+  -H "Content-Type: application/json" \
+  -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "多周改期回滚"}'
+```
+
+**修复前**：两条都被 denied，因为用 W1 的日期 2026-08-10 校验 W2 的实际日期 2026-08-17，误判为外部修改。
+
+**修复后**：两条都 success，因为：
+- W1 用基线 expected_new_date = 2026-08-10 校验
+- W2 用基线 expected_new_date = 2026-08-17 校验
+
+7. 验证回滚结果：
+```bash
+curl "http://127.0.0.1:8003/api/bookings/batches/{BATCH_ID}?operator_id=admin1&operator_role=admin"
+```
+确认两条都恢复到原始日期：2026-07-06 和 2026-07-13。
+
+---
+
+### 场景3：重启后数据连续性验证
+
+**目标**：验证服务重启后，快照、审计数据完整，可继续操作
+
+```bash
+# 1. 先创建批次、创建快照、执行快照
+# （代码略，同场景2步骤1-3）
+
+# 2. 记录重启前数据
+curl "http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}?operator_id=admin1&operator_role=admin" > snapshot_before.json
+
+# 3. 重启服务（Ctrl+C 再启动）
+
+# 4. 验证重启后数据连续
+curl "http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}?operator_id=admin1&operator_role=admin" > snapshot_after.json
+
+# 对比 snapshot_before.json 和 snapshot_after.json：
+# - id、status、operation_result 完全一致
+# - booking_snapshots 数组长度和内容一致
+
+# 5. 验证重启后可继续回滚
+curl -X POST http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/rollback \
+  -H "Content-Type: application/json" \
+  -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "重启后回滚"}'
+# 应返回 status = "rolled_back"，操作正常完成
+```
+
+---
+
+### 场景4：冲突检测与可读提示验证
+
+**目标**：验证外部修改某条记录后，回滚时给出 expected/actual 差异，未冲突记录正常回退
+
+```bash
+# 1. 创建2周批次，创建快照，执行快照
+# （代码略，同场景2步骤1-3）
+
+# 2. 外部修改记录1的时间
+curl -X PUT http://127.0.0.1:8003/api/bookings/{BID_W1} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "zhangsan",
+    "date": "2026-08-10",
+    "start_time": "10:00",
+    "end_time": "11:00",
+    "status": "pending",
+    "operator_id": "external_modifier",
+    "operator_role": "admin",
+    "reason": "外部修改制造冲突"
+  }'
+
+# 3. 回滚快照
+curl -X POST http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/rollback \
+  -H "Content-Type: application/json" \
+  -d '{"operator_id": "admin1", "operator_role": "admin", "reason": "冲突回滚测试"}'
+```
+
+**预期结果**：
+- `rollback_result.success = 1`（记录2正常回滚）
+- `rollback_result.denied = 1`（记录1被拒绝）
+- 记录1的 `message` 包含类似：
+  ```
+  External modification detected. Expected: date=2026-08-10, time=14:00-15:00. Actual: date=2026-08-10, time=10:00-11:00.
+  ```
+- 记录1保持外部修改后的时间 10:00-11:00
+- 记录2恢复到原始日期
+
+**用比对接口查看差异**：
+```bash
+curl "http://127.0.0.1:8003/api/snapshots/{SNAPSHOT_ID}/compare?operator_id=admin1&operator_role=admin"
+```
+返回 `changed_count = 1`，`field_diffs` 清晰列出 start_time 和 end_time 的 expected/actual 值。
+
+---
+
+### 一键执行所有回归测试
+
+```bash
+# 只跑重构后新增的回归测试
+python batch_takeover_test.py --mode regression
+
+# 跑全部测试（原有16场景 + 新增4回归场景）
+python batch_takeover_test.py --mode all
+
+# 指定服务地址
+python batch_takeover_test.py --mode regression --base http://127.0.0.1:8003
+```
+
+**测试输出示例**：
+```
+######################################################################
+#                                                                    #
+#          重构后回归测试 - 关键链路验证                              #
+#                                                                    #
+######################################################################
+
+  覆盖场景:
+    1. 旧库启动 - 数据库迁移与初始化顺序
+    2. 多周改期回滚 - 每条记录独立基线判断
+    3. 重启连续性 - 快照/审计数据持久化正确
+    4. 冲突可读提示 - expected/actual 差异清晰
+
+...（测试过程输出）...
+
+######################################################################
+#                                                                    #
+#  重构后回归测试结果: 48 通过, 0 失败                               #
+#                                                                    #
+######################################################################
+
+  ✅ 全部通过！重构后关键链路功能完整。
+```
+
+退出码 0 表示全部通过，退出码 1 表示有失败。

@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import date, time, datetime, timedelta
 
 from booking import (
@@ -586,11 +587,9 @@ def execute_snapshot(snapshot_id: int, body: SnapshotExecute) -> SnapshotOut:
     return result
 
 
-def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params: dict, body: SnapshotExecute) -> SnapshotOperationResult:
-    batch_id = snapshot_row["batch_id"]
-    snapshot_id = snapshot_row["id"]
-
-    room_id = snapshot_bookings[0]["room_id"]
+def _build_reschedule_execution_baseline(
+    snapshot_bookings: list, operation_params: dict
+) -> tuple[list, list]:
     original_start_time = snapshot_bookings[0]["start_time"]
     original_end_time = snapshot_bookings[0]["end_time"]
 
@@ -604,23 +603,47 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
         else:
             preserved_items_info.append((sb, phase))
 
-    if not adjustable_items:
-        raise BookingError(
-            ErrorCode.BATCH_NOTHING_TO_OPERATE,
-            "No adjustable bookings in this snapshot (all in effect, approved, or finished)"
-        )
-
     new_start_date_str = operation_params.get("new_start_date")
     new_start_time_str = operation_params.get("new_start_time", original_start_time)
     new_end_time_str = operation_params.get("new_end_time", original_end_time)
 
-    if not new_start_date_str:
-        raise BookingError(
-            ErrorCode.INVALID_TIME_RANGE,
-            "new_start_date is required for reschedule operation"
-        )
-
     new_start_date = date.fromisoformat(new_start_date_str)
+
+    baseline = []
+    for idx, sb in enumerate(adjustable_items):
+        expected_new_date = (new_start_date + timedelta(weeks=idx)).isoformat()
+        baseline.append({
+            "booking_id": sb["booking_id"],
+            "old_date": sb["date"],
+            "old_start_time": sb["start_time"],
+            "old_end_time": sb["end_time"],
+            "old_status": sb["status"],
+            "expected_new_date": expected_new_date,
+            "expected_new_start_time": new_start_time_str,
+            "expected_new_end_time": new_end_time_str,
+            "week_phase_before": BookingWeekPhase(sb["week_phase"]).value,
+        })
+
+    return baseline, preserved_items_info
+
+
+def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params: dict, body: SnapshotExecute) -> SnapshotOperationResult:
+    batch_id = snapshot_row["batch_id"]
+    snapshot_id = snapshot_row["id"]
+
+    room_id = snapshot_bookings[0]["room_id"]
+    original_start_time = snapshot_bookings[0]["start_time"]
+    original_end_time = snapshot_bookings[0]["end_time"]
+
+    baseline, preserved_items_info = _build_reschedule_execution_baseline(
+        snapshot_bookings, operation_params
+    )
+
+    if not baseline:
+        raise BookingError(
+            ErrorCode.BATCH_NOTHING_TO_OPERATE,
+            "No adjustable bookings in this snapshot (all in effect, approved, or finished)"
+        )
 
     items: list[SnapshotOperationResultItem] = []
     success_count = 0
@@ -638,20 +661,22 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
             result="preserved",
             week_phase_before=phase.value,
             message=f"Preserved ({phase.value.replace('_', ' ')})",
+            expected_new_date=sb["date"],
+            expected_new_start_time=sb["start_time"],
+            expected_new_end_time=sb["end_time"],
+            expected_new_status=sb["status"],
         ))
 
-    new_dates = []
-    for i in range(len(adjustable_items)):
-        nd = new_start_date + timedelta(weeks=i)
-        new_dates.append(nd.isoformat())
-
-    for idx, sb in enumerate(adjustable_items):
-        old_date = sb["date"]
-        old_status = sb["status"]
-        new_date = new_dates[idx]
-        booking_id = sb["booking_id"]
-
-        phase_before = BookingWeekPhase(sb["week_phase"])
+    for item_baseline in baseline:
+        booking_id = item_baseline["booking_id"]
+        old_date = item_baseline["old_date"]
+        old_start_time = item_baseline["old_start_time"]
+        old_end_time = item_baseline["old_end_time"]
+        old_status = item_baseline["old_status"]
+        new_date = item_baseline["expected_new_date"]
+        new_start_time_str = item_baseline["expected_new_start_time"]
+        new_end_time_str = item_baseline["expected_new_end_time"]
+        phase_before = item_baseline["week_phase_before"]
 
         try:
             room = conn.execute("SELECT * FROM rooms WHERE id = ?", (room_id,)).fetchone()
@@ -730,7 +755,11 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
                 old_status=old_status,
                 new_status=old_status,
                 result="success",
-                week_phase_before=phase_before.value,
+                week_phase_before=phase_before,
+                expected_new_date=new_date,
+                expected_new_start_time=new_start_time_str,
+                expected_new_end_time=new_end_time_str,
+                expected_new_status=old_status,
             ))
             success_count += 1
 
@@ -746,7 +775,11 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
                     result="denied",
                     error_code=e.code,
                     message=e.message,
-                    week_phase_before=phase_before.value,
+                    week_phase_before=phase_before,
+                    expected_new_date=new_date,
+                    expected_new_start_time=new_start_time_str,
+                    expected_new_end_time=new_end_time_str,
+                    expected_new_status=old_status,
                 ))
                 denied_count += 1
             else:
@@ -759,7 +792,11 @@ def _execute_reschedule(conn, snapshot_row, snapshot_bookings, operation_params:
                     result="skipped",
                     error_code=e.code,
                     message=e.message,
-                    week_phase_before=phase_before.value,
+                    week_phase_before=phase_before,
+                    expected_new_date=new_date,
+                    expected_new_start_time=new_start_time_str,
+                    expected_new_end_time=new_end_time_str,
+                    expected_new_status=old_status,
                 ))
                 skipped_count += 1
 
@@ -808,6 +845,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                 result="preserved",
                 week_phase_before=phase.value,
                 message="Preserved (booking already in effect / passed)",
+                expected_new_date=old_date,
+                expected_new_status=old_status,
             ))
             preserved_count += 1
             continue
@@ -836,6 +875,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                     result="success",
                     week_phase_before=phase.value,
                     message="Admin/staff cancelled approved booking",
+                    expected_new_date=old_date,
+                    expected_new_status="cancelled",
                 ))
                 success_count += 1
                 continue
@@ -850,6 +891,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                     error_code=ErrorCode.INVALID_STATUS_TRANSITION,
                     message=f"Unexpected error: {e}",
                     week_phase_before=phase.value,
+                    expected_new_date=old_date,
+                    expected_new_status=old_status,
                 ))
                 denied_count += 1
                 continue
@@ -865,6 +908,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                 error_code=ErrorCode.INVALID_STATUS_TRANSITION,
                 message=f"Cannot cancel booking with status '{old_status}'",
                 week_phase_before=phase.value,
+                expected_new_date=old_date,
+                expected_new_status=old_status,
             ))
             skipped_count += 1
             continue
@@ -890,6 +935,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                 new_status="cancelled",
                 result="success",
                 week_phase_before=phase.value,
+                expected_new_date=old_date,
+                expected_new_status="cancelled",
             ))
             success_count += 1
         except Exception as e:
@@ -902,6 +949,8 @@ def _execute_cancel(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
                 result="denied",
                 message=f"Unexpected error: {e}",
                 week_phase_before=phase.value,
+                expected_new_date=old_date,
+                expected_new_status=old_status,
             ))
             denied_count += 1
 
@@ -941,6 +990,10 @@ def _execute_export(conn, snapshot_row, snapshot_bookings, body: SnapshotExecute
             result="success",
             week_phase_before=sb["week_phase"],
             message="Exported in snapshot",
+            expected_new_date=sb["date"],
+            expected_new_start_time=sb["start_time"],
+            expected_new_end_time=sb["end_time"],
+            expected_new_status=sb["status"],
         ))
         success_count += 1
 
@@ -1051,15 +1104,123 @@ def rollback_snapshot(snapshot_id: int, body: SnapshotRollback) -> SnapshotOut:
     return result
 
 
+def _build_rollback_baseline_from_execution_result(
+    operation_result: dict, snapshot_bookings: list
+) -> dict:
+    baseline_map = {}
+    result_items = operation_result.get("items", [])
+
+    for item in result_items:
+        booking_id = item.get("booking_id")
+        if booking_id is None:
+            continue
+
+        sb = next((b for b in snapshot_bookings if b["booking_id"] == booking_id), None)
+        if sb is None:
+            continue
+
+        expected_new_date = item.get("expected_new_date")
+        expected_new_start_time = item.get("expected_new_start_time") or sb["start_time"]
+        expected_new_end_time = item.get("expected_new_end_time") or sb["end_time"]
+        expected_new_status = item.get("expected_new_status") or sb["status"]
+
+        result = item.get("result")
+
+        baseline_map[booking_id] = {
+            "booking_id": booking_id,
+            "old_date": sb["date"],
+            "old_start_time": sb["start_time"],
+            "old_end_time": sb["end_time"],
+            "old_status": sb["status"],
+            "expected_new_date": expected_new_date,
+            "expected_new_start_time": expected_new_start_time,
+            "expected_new_end_time": expected_new_end_time,
+            "expected_new_status": expected_new_status,
+            "week_phase": sb["week_phase"],
+            "execution_result": result,
+        }
+
+    return baseline_map
+
+
+def _check_rollback_conflict_for_item(
+    baseline: dict, current_booking: sqlite3.Row, operation_type: str
+) -> tuple[bool, str]:
+    booking_id = baseline["booking_id"]
+
+    if operation_type == SnapshotOperationType.RESCHEDULE.value:
+        if baseline["execution_result"] != "success":
+            return False, ""
+
+        current_dt = str(current_booking["date"])
+        current_st = str(current_booking["start_time"])
+        current_et = str(current_booking["end_time"])
+        current_status = str(current_booking["status"])
+
+        exp_dt = str(baseline["expected_new_date"])
+        exp_st = str(baseline["expected_new_start_time"])
+        exp_et = str(baseline["expected_new_end_time"])
+        exp_status = str(baseline["expected_new_status"])
+
+        date_match = current_dt == exp_dt
+        start_match = current_st.startswith(exp_st)
+        end_match = current_et.startswith(exp_et)
+        date_time_match = date_match and start_match and end_match
+        status_match = current_status == exp_status
+        current_matches_expected = date_time_match and status_match
+
+        if not current_matches_expected:
+            mismatch_parts = []
+            if not date_time_match:
+                mismatch_parts.append(
+                    f"Expected: date={exp_dt}, time={exp_st}-{exp_et}. "
+                    f"Actual: date={current_dt}, time={current_st}-{current_et}."
+                )
+            if not status_match:
+                mismatch_parts.append(
+                    f"Expected: status={exp_status}. Actual: status={current_status}."
+                )
+            message = (
+                f"Cannot rollback: booking #{booking_id} state does not match expected state after snapshot execution. "
+                f"{' '.join(mismatch_parts)} "
+                f"The booking may have been modified after the snapshot was executed."
+            )
+            return True, message
+
+    elif operation_type == SnapshotOperationType.CANCEL.value:
+        if baseline["execution_result"] != "success":
+            return False, ""
+
+        current_status = str(current_booking["status"])
+        exp_status = str(baseline["expected_new_status"])
+
+        if current_status != exp_status:
+            message = (
+                f"Cannot rollback: booking #{booking_id} status does not match expected state after snapshot execution. "
+                f"Expected: status={exp_status}. Actual: status={current_status}. "
+                f"The booking may have been modified after the snapshot was executed."
+            )
+            return True, message
+
+    return False, ""
+
+
 def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollback) -> SnapshotOperationResult:
     batch_id = snapshot_row["batch_id"]
     snapshot_id = snapshot_row["id"]
     operation_type = snapshot_row["operation_type"]
-    operation_params = json.loads(snapshot_row["operation_params"]) if snapshot_row["operation_params"] else {}
 
-    expected_new_date = operation_params.get("new_start_date")
-    expected_new_start_time = operation_params.get("new_start_time")
-    expected_new_end_time = operation_params.get("new_end_time")
+    operation_result_json = snapshot_row["operation_result"]
+    if not operation_result_json:
+        raise BookingError(
+            ErrorCode.SNAPSHOT_INVALID_STATUS,
+            f"Snapshot #{snapshot_id} has no execution result, cannot rollback"
+        )
+
+    operation_result = json.loads(operation_result_json)
+    rollback_baseline = _build_rollback_baseline_from_execution_result(
+        operation_result, snapshot_bookings
+    )
 
     items: list[SnapshotOperationResultItem] = []
     success_count = 0
@@ -1074,6 +1235,22 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
         old_end_time = sb["end_time"]
         old_status = sb["status"]
         phase = BookingWeekPhase(sb["week_phase"])
+
+        baseline = rollback_baseline.get(booking_id)
+        if baseline is None:
+            baseline = {
+                "booking_id": booking_id,
+                "old_date": old_date,
+                "old_start_time": old_start_time,
+                "old_end_time": old_end_time,
+                "old_status": old_status,
+                "expected_new_date": old_date,
+                "expected_new_start_time": old_start_time,
+                "expected_new_end_time": old_end_time,
+                "expected_new_status": old_status,
+                "week_phase": sb["week_phase"],
+                "execution_result": "preserved",
+            }
 
         current = conn.execute(
             "SELECT * FROM bookings WHERE id = ?", (booking_id,)
@@ -1137,54 +1314,23 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                 skipped_count += 1
                 continue
 
-            # reschedule 冲突检测：只要传了 new_start_date 就进行（即使时间没改，也要检查 date 是否正确 + status 是否被外部改动）
-            if expected_new_date:
-                current_dt = str(current["date"])
-                current_st = str(current["start_time"])
-                current_et = str(current["end_time"])
-                current_status = str(current["status"])
-                exp_dt = str(expected_new_date)
-                # 如果没传新时间，就用快照基线的时间作为期望值（因为没改时间）
-                exp_st = str(expected_new_start_time) if expected_new_start_time else str(old_start_time)
-                exp_et = str(expected_new_end_time) if expected_new_end_time else str(old_end_time)
-                exp_status = str(old_status)
-
-                date_time_match = (
-                    current_dt == exp_dt and
-                    current_st.startswith(exp_st) and
-                    current_et.startswith(exp_et)
-                )
-                status_match = current_status == exp_status
-                current_matches_expected = date_time_match and status_match
-
-                if not current_matches_expected:
-                    mismatch_parts = []
-                    if not date_time_match:
-                        mismatch_parts.append(
-                            f"Expected: date={exp_dt}, time={exp_st}-{exp_et}. "
-                            f"Actual: date={current_dt}, time={current_st}-{current_et}."
-                        )
-                    if not status_match:
-                        mismatch_parts.append(
-                            f"Expected: status={exp_status}. Actual: status={current_status}."
-                        )
-                    items.append(SnapshotOperationResultItem(
-                        booking_id=booking_id,
-                        old_date=current["date"],
-                        new_date=old_date,
-                        old_status=current["status"],
-                        new_status=old_status,
-                        result="denied",
-                        error_code=ErrorCode.SNAPSHOT_BOOKING_CHANGED,
-                        message=(
-                            f"Cannot rollback: booking state does not match expected state after snapshot execution. "
-                            f"{' '.join(mismatch_parts)} "
-                            f"The booking may have been modified after the snapshot was executed."
-                        ),
-                        week_phase_before=phase.value,
-                    ))
-                    denied_count += 1
-                    continue
+            has_conflict, conflict_msg = _check_rollback_conflict_for_item(
+                baseline, current, operation_type
+            )
+            if has_conflict:
+                items.append(SnapshotOperationResultItem(
+                    booking_id=booking_id,
+                    old_date=current["date"],
+                    new_date=old_date,
+                    old_status=current["status"],
+                    new_status=old_status,
+                    result="denied",
+                    error_code=ErrorCode.SNAPSHOT_BOOKING_CHANGED,
+                    message=conflict_msg,
+                    week_phase_before=phase.value,
+                ))
+                denied_count += 1
+                continue
 
             try:
                 room = conn.execute("SELECT * FROM rooms WHERE id = ?", (sb["room_id"],)).fetchone()
@@ -1303,7 +1449,10 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                 skipped_count += 1
                 continue
 
-            if current["status"] != "cancelled":
+            has_conflict, conflict_msg = _check_rollback_conflict_for_item(
+                baseline, current, operation_type
+            )
+            if has_conflict:
                 items.append(SnapshotOperationResultItem(
                     booking_id=booking_id,
                     old_date=current["date"],
@@ -1312,7 +1461,7 @@ def _execute_rollback(conn, snapshot_row, snapshot_bookings, body: SnapshotRollb
                     new_status=old_status,
                     result="denied",
                     error_code=ErrorCode.SNAPSHOT_BOOKING_CHANGED,
-                    message=f"Cannot rollback cancel: booking status is '{current['status']}', not 'cancelled'",
+                    message=conflict_msg,
                     week_phase_before=phase.value,
                 ))
                 denied_count += 1
@@ -1515,3 +1664,116 @@ def cancel_snapshot(snapshot_id: int, operator_id: str, operator_role: str, reas
         result = _snapshot_row_to_out(conn, snapshot_row)
 
     return result
+
+
+def compare_snapshot_execution_result(snapshot_id: int, operator_id: str | None = None, operator_role: str = "resident") -> dict:
+    conn = get_db_readonly()
+    row = conn.execute(
+        "SELECT * FROM batch_snapshots WHERE id = ?", (snapshot_id,)
+    ).fetchone()
+
+    if not row:
+        raise BookingError(ErrorCode.SNAPSHOT_NOT_FOUND)
+
+    if operator_role == "resident" and row["batch_user_id"] != operator_id:
+        raise BookingError(
+            ErrorCode.PERMISSION_DENIED,
+            "Residents can only compare their own snapshots"
+        )
+
+    snapshot_bookings = conn.execute(
+        "SELECT * FROM snapshot_bookings WHERE snapshot_id = ? ORDER BY date, start_time",
+        (snapshot_id,)
+    ).fetchall()
+
+    operation_result_json = row["operation_result"]
+    if not operation_result_json:
+        return {
+            "snapshot_id": snapshot_id,
+            "has_result": False,
+            "comparison": None,
+        }
+
+    operation_result = json.loads(operation_result_json)
+    operation_items = operation_result.get("items", [])
+
+    comparison_items = []
+    all_match = True
+    changed_items = []
+    unchanged_items = []
+
+    for item in operation_items:
+        booking_id = item.get("booking_id")
+        if booking_id is None:
+            continue
+
+        sb = next((b for b in snapshot_bookings if b["booking_id"] == booking_id), None)
+        if sb is None:
+            continue
+
+        current = conn.execute(
+            "SELECT * FROM bookings WHERE id = ?", (booking_id,)
+        ).fetchone()
+
+        result = item.get("result")
+        expected_new_date = item.get("expected_new_date")
+        expected_new_start_time = item.get("expected_new_start_time")
+        expected_new_end_time = item.get("expected_new_end_time")
+        expected_new_status = item.get("expected_new_status")
+
+        comparison = {
+            "booking_id": booking_id,
+            "execution_result": result,
+            "expected": {},
+            "actual": {},
+            "matches": False,
+            "field_diffs": [],
+        }
+
+        if result == "success":
+            if expected_new_date is not None:
+                comparison["expected"]["date"] = expected_new_date
+                comparison["expected"]["start_time"] = expected_new_start_time
+                comparison["expected"]["end_time"] = expected_new_end_time
+                comparison["expected"]["status"] = expected_new_status
+
+            if current:
+                    comparison["actual"]["date"] = str(current["date"])
+                    comparison["actual"]["start_time"] = str(current["start_time"])
+                    comparison["actual"]["end_time"] = str(current["end_time"])
+                    comparison["actual"]["status"] = str(current["status"])
+
+                    field_diffs = []
+                    for field in ["date", "start_time", "end_time", "status"]:
+                        exp = comparison["expected"].get(field)
+                        act = comparison["actual"].get(field)
+                        if exp is not None and str(exp) != str(act):
+                            field_diffs.append({
+                                "field": field,
+                                "expected_value": exp,
+                                "actual_value": act,
+                            })
+
+                    comparison["field_diffs"] = field_diffs
+                    comparison["matches"] = len(field_diffs) == 0
+
+                    if not comparison["matches"]:
+                        all_match = False
+                        changed_items.append(comparison)
+                    else:
+                        unchanged_items.append(comparison)
+
+        comparison_items.append(comparison)
+
+    return {
+        "snapshot_id": snapshot_id,
+        "has_result": True,
+        "all_match": all_match,
+        "total_items": len(comparison_items),
+        "changed_count": len(changed_items),
+        "unchanged_count": len(unchanged_items),
+        "denied_or_preserved_count": len(comparison_items) - len(changed_items) - len(unchanged_items),
+        "changed_items": changed_items,
+        "unchanged_items": unchanged_items,
+        "all_comparison_items": comparison_items,
+    }

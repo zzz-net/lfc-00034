@@ -267,6 +267,10 @@ class SnapshotOperationResultItem(BaseModel):
     error_code: int | None = None
     message: str | None = None
     week_phase_before: str | None = None
+    expected_new_date: str | None = None
+    expected_new_start_time: str | None = None
+    expected_new_end_time: str | None = None
+    expected_new_status: str | None = None
 
 
 class SnapshotOperationResult(BaseModel):

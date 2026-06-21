@@ -9,6 +9,7 @@ from booking.batch_takeover import (
     rollback_snapshot,
     export_snapshot,
     cancel_snapshot,
+    compare_snapshot_execution_result,
 )
 from booking.models import (
     SnapshotCreate,
@@ -72,6 +73,15 @@ def api_export_snapshot(
             ),
         },
     )
+
+
+@router.get("/{snapshot_id}/compare")
+def api_compare_snapshot_execution_result(
+    snapshot_id: int,
+    operator_id: str | None = None,
+    operator_role: str = Query(default="resident", pattern="^(admin|staff|resident)$"),
+):
+    return compare_snapshot_execution_result(snapshot_id, operator_id, operator_role)
 
 
 @router.post("/{snapshot_id}/cancel", response_model=SnapshotOut)
